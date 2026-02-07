@@ -18,9 +18,8 @@
 
 <br />
 
-> **Ship AI-powered automation in minutes, not weeks.**
-> Full programmatic control over real Claude Code instances — REST API, TypeScript SDK, web dashboard.
-> No Agent SDK. No `-p` mode. Real agents. Real tools. Real results.
+> Control real Claude Code instances through a **REST API**, a **TypeScript SDK**, or a **Web Dashboard**.
+> Spawn agents, send them messages, assign tasks, approve plans — from your code or your browser.
 
 <br />
 
@@ -28,52 +27,54 @@
 
 <br />
 
-## What you can build
+## Why this instead of the Agent SDK?
 
-<table>
-<tr>
-<td width="50%">
+This runs **real Claude Code processes**. Not a wrapper around the API. Not a simplified `-p` mode. Actual Claude Code — the same one you use in your terminal every day.
 
-### Automated Code Review Pipeline
-Spawn 3 specialized agents (security, performance, style) that review every PR in parallel — then aggregate their findings into a single report.
+That means:
 
-</td>
-<td width="50%">
+- **Uses your Claude Code subscription** — No separate API key. No usage-based billing surprise. If you have a Max plan, your agents run on it.
+- **Day 0 features** — When Anthropic ships a new Claude Code feature (new tools, new models, better context handling), you get it immediately. No library update needed. No waiting for SDK support.
+- **Full tool access** — Bash, Read, Write, Edit, Glob, Grep, WebSearch, Task sub-agents... everything Claude Code can do, your agents can do.
+- **Real terminal environment** — Agents run in a PTY. They can install packages, run tests, use git, call APIs. They work in your actual project directory.
+- **Battle-tested agent loop** — Claude Code's agent loop is production-hardened. You get all of that for free: retries, error handling, tool orchestration, context management.
 
-### Self-Healing CI/CD
-When your CI fails, trigger an agent that reads the logs, diagnoses the issue, writes the fix, and opens a PR — all through a single API call.
+<br />
 
-</td>
-</tr>
-<tr>
-<td width="50%">
+---
 
-### Codebase Migration at Scale
-Spin up a fleet of agents that each handle a different module: upgrade dependencies, rewrite imports, update APIs — orchestrated through task dependencies.
+<br />
 
-</td>
-<td width="50%">
+## What you can do
 
-### AI-Powered Internal Tools
-Build Slack bots, webhook handlers, or internal dashboards that trigger Claude Code agents to refactor code, generate docs, or triage issues on demand.
+**Spawn multiple agents on the same codebase**, each with a different role. One reviews security, another writes tests, another refactors — all in parallel, all through a simple API.
 
-</td>
-</tr>
-<tr>
-<td width="50%">
+```bash
+# Spawn an agent via the REST API
+curl -X POST http://localhost:3000/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name": "security-reviewer", "model": "opus"}'
 
-### Multi-Agent Research & Analysis
-Assign agents to different parts of a codebase to investigate bugs, map dependencies, or produce architecture documentation — in parallel.
+# Give it work
+curl -X POST http://localhost:3000/agents/security-reviewer/messages \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Audit src/auth/ for vulnerabilities. Reply with SendMessage."}'
+```
 
-</td>
-<td width="50%">
+**Build automation on top of Claude Code.** A webhook that triggers a code fix when CI fails. A Slack bot that assigns tasks to agents. A cron job that runs nightly code reviews. If you can make an HTTP call, you can control Claude Code.
 
-### Interactive Dev Dashboard
-Use the built-in web UI to monitor agents in real-time, approve plans, grant permissions, and manage tasks — all from your browser.
+**Monitor and control agents from a web dashboard.** See what each agent is doing, approve or reject their plans, grant tool permissions, kill runaway agents — all in real-time from your browser.
 
-</td>
-</tr>
-</table>
+**Manage work with tasks.** Create tasks, assign them to agents, track progress, define dependencies between tasks. Agents pick up their assignments and report back when done.
+
+```typescript
+const taskId = await ctrl.createTask({
+  subject: "Add input validation to all API routes",
+  description: "Use zod schemas for request body validation in src/routes/",
+});
+await ctrl.assignTask(taskId, "coder");
+await ctrl.waitForTask(taskId); // blocks until done
+```
 
 <br />
 
@@ -83,14 +84,14 @@ Use the built-in web UI to monitor agents in real-time, approve plans, grant per
 
 ## Features
 
-- **REST API** — Control everything over HTTP. Spawn agents, send messages, manage tasks. Integrates with any language, any platform.
-- **TypeScript SDK** — First-class programmatic control. Event-driven architecture with full type safety.
-- **Multi-Agent Orchestration** — Run multiple agents in parallel, each with their own role, model, and permissions.
-- **Task Management** — Create tasks, assign them to agents, track status, define blocking dependencies.
-- **Real-Time Events** — Plan approvals, permission requests, idle notifications, message streaming.
-- **Web Dashboard** — Built-in UI for real-time monitoring, agent management, and interactive approvals.
-- **Custom API Routing** — Point agents at any Anthropic-compatible endpoint. Per-agent environment overrides.
-- **Full Tool Access** — Agents get all Claude Code tools: Bash, Read, Write, Glob, Grep, and more.
+- **REST API** — Control everything over HTTP. Spawn agents, send messages, manage tasks. Works from any language, any platform.
+- **TypeScript SDK** — Full programmatic control with type safety and an event-driven architecture.
+- **Web Dashboard** — Real-time monitoring, agent management, and interactive approvals from your browser.
+- **Multi-Agent** — Run multiple agents in parallel, each with their own role, model, and permissions.
+- **Task Management** — Create tasks, assign them, track status, define blocking dependencies.
+- **Plan & Permission Approval** — Agents ask before acting. You approve or reject — programmatically or from the UI.
+- **Any Provider** — Point agents at any Anthropic-compatible endpoint. Per-agent environment and API key overrides.
+- **Your Subscription** — Runs on your existing Claude Code plan. No separate API costs.
 
 <br />
 
