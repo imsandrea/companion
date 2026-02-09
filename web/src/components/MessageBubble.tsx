@@ -1,8 +1,8 @@
-import { useState, type ComponentProps } from "react";
+import { useState, useMemo, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
-import { ToolBlock } from "./ToolBlock.js";
+import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.role === "system") {
@@ -37,8 +37,43 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
+interface ToolGroupItem {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+type GroupedBlock =
+  | { kind: "content"; block: ContentBlock }
+  | { kind: "tool_group"; name: string; items: ToolGroupItem[] };
+
+function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
+  const groups: GroupedBlock[] = [];
+
+  for (const block of blocks) {
+    if (block.type === "tool_use") {
+      const last = groups[groups.length - 1];
+      if (last?.kind === "tool_group" && last.name === block.name) {
+        last.items.push({ id: block.id, name: block.name, input: block.input });
+      } else {
+        groups.push({
+          kind: "tool_group",
+          name: block.name,
+          items: [{ id: block.id, name: block.name, input: block.input }],
+        });
+      }
+    } else {
+      groups.push({ kind: "content", block });
+    }
+  }
+
+  return groups;
+}
+
 function AssistantMessage({ message }: { message: ChatMessage }) {
   const blocks = message.contentBlocks || [];
+
+  const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
 
   if (blocks.length === 0 && message.content) {
     return (
@@ -55,9 +90,18 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
     <div className="flex items-start gap-3">
       <AssistantAvatar />
       <div className="flex-1 min-w-0 space-y-3">
-        {blocks.map((block, i) => (
-          <ContentBlockRenderer key={i} block={block} />
-        ))}
+        {grouped.map((group, i) => {
+          if (group.kind === "content") {
+            return <ContentBlockRenderer key={i} block={group.block} />;
+          }
+          // Single tool_use renders as before
+          if (group.items.length === 1) {
+            const item = group.items[0];
+            return <ToolBlock key={i} name={item.name} input={item.input} toolUseId={item.id} />;
+          }
+          // Grouped tool_uses
+          return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
+        })}
       </div>
     </div>
   );
@@ -203,6 +247,48 @@ function ContentBlockRenderer({ block }: { block: ContentBlock }) {
   }
 
   return null;
+}
+
+function ToolGroupBlock({ name, items }: { name: string; items: ToolGroupItem[] }) {
+  const [open, setOpen] = useState(false);
+  const iconType = getToolIcon(name);
+  const label = getToolLabel(name);
+
+  return (
+    <div className="border border-cc-border rounded-[10px] overflow-hidden bg-cc-card">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-cc-hover transition-colors cursor-pointer"
+      >
+        <svg
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          className={`w-3 h-3 text-cc-muted transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
+        >
+          <path d="M6 4l4 4-4 4" />
+        </svg>
+        <ToolIcon type={iconType} />
+        <span className="text-xs font-medium text-cc-fg">{label}</span>
+        <span className="text-[10px] text-cc-muted bg-cc-hover rounded-full px-1.5 py-0.5 tabular-nums">
+          {items.length}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-cc-border px-3 py-1.5">
+          {items.map((item, i) => {
+            const preview = getPreview(item.name, item.input);
+            return (
+              <div key={item.id || i} className="flex items-center gap-2 py-1 text-xs text-cc-muted font-mono-code truncate">
+                <span className="w-1 h-1 rounded-full bg-cc-muted/40 shrink-0" />
+                <span className="truncate">{preview || JSON.stringify(item.input).slice(0, 80)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ThinkingBlock({ text }: { text: string }) {

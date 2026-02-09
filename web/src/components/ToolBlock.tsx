@@ -15,11 +15,11 @@ const TOOL_ICONS: Record<string, string> = {
   SendMessage: "message",
 };
 
-function getToolIcon(name: string): string {
+export function getToolIcon(name: string): string {
   return TOOL_ICONS[name] || "tool";
 }
 
-function getToolLabel(name: string): string {
+export function getToolLabel(name: string): string {
   if (name === "Bash") return "Terminal";
   if (name === "Read") return "Read File";
   if (name === "Write") return "Write File";
@@ -138,7 +138,7 @@ function WriteToolDetail({ input }: { input: Record<string, unknown> }) {
   );
 }
 
-function getPreview(name: string, input: Record<string, unknown>): string {
+export function getPreview(name: string, input: Record<string, unknown>): string {
   if (name === "Bash" && typeof input.command === "string") {
     return input.command.length > 60 ? input.command.slice(0, 60) + "..." : input.command;
   }
@@ -152,7 +152,7 @@ function getPreview(name: string, input: Record<string, unknown>): string {
   return "";
 }
 
-function ToolIcon({ type }: { type: string }) {
+export function ToolIcon({ type }: { type: string }) {
   const cls = "w-3.5 h-3.5 text-cc-primary shrink-0";
 
   if (type === "terminal") {
