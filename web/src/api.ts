@@ -1,4 +1,6 @@
 import type { SdkSessionInfo } from "./types.js";
+import type { CronJob, CronJobCreate, CronJobPatch, CronRunLogEntry, ScheduleType } from "../server/cron-types.js";
+export type { CronJob, CronJobCreate, CronJobPatch, CronRunLogEntry, ScheduleType };
 
 const BASE = "/api";
 
@@ -199,4 +201,17 @@ export const api = {
     put<{ ok: boolean; path: string }>("/fs/write", { path, content }),
   getFileDiff: (path: string) =>
     get<{ path: string; diff: string }>(`/fs/diff?path=${encodeURIComponent(path)}`),
+
+  // Cron / Scheduled Jobs
+  listCronJobs: () => get<CronJob[]>("/cron/jobs"),
+  getCronJob: (id: string) => get<CronJob>(`/cron/jobs/${encodeURIComponent(id)}`),
+  createCronJob: (input: CronJobCreate) => post<CronJob>("/cron/jobs", input),
+  updateCronJob: (id: string, data: CronJobPatch) =>
+    patch<CronJob>(`/cron/jobs/${encodeURIComponent(id)}`, data),
+  deleteCronJob: (id: string) => del(`/cron/jobs/${encodeURIComponent(id)}`),
+  runCronJob: (id: string) => post<{ sessionId: string }>(`/cron/jobs/${encodeURIComponent(id)}/run`),
+  getCronJobRuns: (id: string, limit?: number) =>
+    get<CronRunLogEntry[]>(`/cron/jobs/${encodeURIComponent(id)}/runs${limit ? `?limit=${limit}` : ""}`),
+  getRecentCronRuns: (limit?: number) =>
+    get<CronRunLogEntry[]>(`/cron/runs${limit ? `?limit=${limit}` : ""}`),
 };

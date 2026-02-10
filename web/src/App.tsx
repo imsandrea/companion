@@ -8,6 +8,7 @@ import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { EditorPanel } from "./components/EditorPanel.js";
 import { Playground } from "./components/Playground.js";
+import { SchedulesPage } from "./components/SchedulesPage.js";
 
 function useHash() {
   return useSyncExternalStore(
@@ -39,6 +40,10 @@ export default function App() {
 
   if (hash === "#/playground") {
     return <Playground />;
+  }
+
+  if (hash === "#/schedules") {
+    return <SchedulesPage />;
   }
 
   return (

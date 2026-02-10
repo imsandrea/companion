@@ -77,6 +77,19 @@ function createMockTracker() {
   } as any;
 }
 
+function createMockCronScheduler() {
+  return {
+    listJobs: vi.fn(() => []),
+    getJob: vi.fn(() => null),
+    createJob: vi.fn(),
+    updateJob: vi.fn(() => null),
+    deleteJob: vi.fn(() => false),
+    runNow: vi.fn(async () => null),
+    getRunLog: vi.fn(() => []),
+    getAllRecentRuns: vi.fn(() => []),
+  } as any;
+}
+
 // ─── Test setup ──────────────────────────────────────────────────────────────
 
 let app: Hono;
@@ -84,6 +97,7 @@ let launcher: ReturnType<typeof createMockLauncher>;
 let bridge: ReturnType<typeof createMockBridge>;
 let sessionStore: ReturnType<typeof createMockStore>;
 let tracker: ReturnType<typeof createMockTracker>;
+let cronScheduler: ReturnType<typeof createMockCronScheduler>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -91,8 +105,9 @@ beforeEach(() => {
   bridge = createMockBridge();
   sessionStore = createMockStore();
   tracker = createMockTracker();
+  cronScheduler = createMockCronScheduler();
   app = new Hono();
-  app.route("/api", createRoutes(launcher, bridge, sessionStore, tracker));
+  app.route("/api", createRoutes(launcher, bridge, sessionStore, tracker, cronScheduler));
 });
 
 // ─── Sessions ────────────────────────────────────────────────────────────────

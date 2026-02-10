@@ -7,11 +7,12 @@ import type { CliLauncher } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
+import type { CronScheduler } from "./cron-scheduler.js";
 import * as envManager from "./env-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 
-export function createRoutes(launcher: CliLauncher, wsBridge: WsBridge, sessionStore: SessionStore, worktreeTracker: WorktreeTracker) {
+export function createRoutes(launcher: CliLauncher, wsBridge: WsBridge, sessionStore: SessionStore, worktreeTracker: WorktreeTracker, cronScheduler: CronScheduler) {
   const api = new Hono();
 
   // ─── SDK Sessions (--sdk-url) ─────────────────────────────────────
@@ -438,6 +439,57 @@ export function createRoutes(launcher: CliLauncher, wsBridge: WsBridge, sessionS
     }
     return { cleaned: result.removed, path: mapping.worktreePath };
   }
+
+  // ─── Cron / Scheduled Jobs ──────────────────────────────────────────────
+
+  api.get("/cron/jobs", (c) => {
+    return c.json(cronScheduler.listJobs());
+  });
+
+  api.get("/cron/jobs/:id", (c) => {
+    const job = cronScheduler.getJob(c.req.param("id"));
+    if (!job) return c.json({ error: "Job not found" }, 404);
+    return c.json(job);
+  });
+
+  api.post("/cron/jobs", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    try {
+      const job = cronScheduler.createJob(body);
+      return c.json(job, 201);
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : "Failed to create job" }, 400);
+    }
+  });
+
+  api.patch("/cron/jobs/:id", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const job = cronScheduler.updateJob(c.req.param("id"), body);
+    if (!job) return c.json({ error: "Job not found" }, 404);
+    return c.json(job);
+  });
+
+  api.delete("/cron/jobs/:id", (c) => {
+    const ok = cronScheduler.deleteJob(c.req.param("id"));
+    if (!ok) return c.json({ error: "Job not found" }, 404);
+    return c.json({ ok: true });
+  });
+
+  api.post("/cron/jobs/:id/run", async (c) => {
+    const result = await cronScheduler.runNow(c.req.param("id"));
+    if (!result) return c.json({ error: "Job not found" }, 404);
+    return c.json(result);
+  });
+
+  api.get("/cron/jobs/:id/runs", (c) => {
+    const limit = Number(c.req.query("limit")) || 50;
+    return c.json(cronScheduler.getRunLog(c.req.param("id"), limit));
+  });
+
+  api.get("/cron/runs", (c) => {
+    const limit = Number(c.req.query("limit")) || 20;
+    return c.json(cronScheduler.getAllRecentRuns(limit));
+  });
 
   return api;
 }

@@ -10,6 +10,7 @@ import { CliLauncher } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
+import { CronScheduler } from "./cron-scheduler.js";
 import { generateSessionTitle } from "./auto-namer.js";
 import * as sessionNames from "./session-names.js";
 import type { SocketData } from "./ws-bridge.js";
@@ -23,6 +24,7 @@ const sessionStore = new SessionStore();
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
 const worktreeTracker = new WorktreeTracker();
+const cronScheduler = new CronScheduler(launcher, wsBridge);
 
 // ── Restore persisted sessions from disk ────────────────────────────────────
 wsBridge.setStore(sessionStore);
@@ -73,7 +75,7 @@ console.log(`[server] Session persistence: ${sessionStore.directory}`);
 const app = new Hono();
 
 app.use("/api/*", cors());
-app.route("/api", createRoutes(launcher, wsBridge, sessionStore, worktreeTracker));
+app.route("/api", createRoutes(launcher, wsBridge, sessionStore, worktreeTracker, cronScheduler));
 
 // In production, serve built frontend using absolute path (works when installed as npm package)
 if (process.env.NODE_ENV === "production") {
@@ -166,3 +168,6 @@ if (starting.length > 0) {
     }
   }, RECONNECT_GRACE_MS);
 }
+
+// ── Start cron scheduler ────────────────────────────────────────────────────
+cronScheduler.start();

@@ -701,6 +701,27 @@ export class WsBridge {
     }
   }
 
+  /** Send a user message to the CLI from the server (used by cron scheduler). */
+  sendUserMessageFromServer(sessionId: string, content: string): void {
+    const session = this.getOrCreateSession(sessionId);
+
+    // Store in history for replay
+    session.messageHistory.push({
+      type: "user_message",
+      content,
+      timestamp: Date.now(),
+    });
+
+    const ndjson = JSON.stringify({
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+      session_id: session.state.session_id || "",
+    });
+    this.sendToCLI(session, ndjson);
+    this.persistSession(session);
+  }
+
   /** Push a session name update to all connected browsers for a session. */
   broadcastNameUpdate(sessionId: string, name: string): void {
     const session = this.sessions.get(sessionId);
