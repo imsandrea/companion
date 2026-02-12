@@ -30,6 +30,12 @@ export function resolveSessionFilePath(filePath: string, cwd?: string): string {
   return normalizePath(`${cwd}/${filePath}`);
 }
 
+function isPathInSessionScope(filePath: string, cwd?: string): boolean {
+  if (!cwd) return true;
+  const normalizedCwd = normalizePath(cwd);
+  return filePath === normalizedCwd || filePath.startsWith(`${normalizedCwd}/`);
+}
+
 function getProcessedSet(sessionId: string): Set<string> {
   let set = processedToolUseIds.get(sessionId);
   if (!set) {
@@ -109,7 +115,10 @@ function extractChangedFilesFromBlocks(sessionId: string, blocks: ContentBlock[]
     if (block.type !== "tool_use") continue;
     const { name, input } = block;
     if ((name === "Edit" || name === "Write") && typeof input.file_path === "string") {
-      store.addChangedFile(sessionId, resolveSessionFilePath(input.file_path, sessionCwd));
+      const resolvedPath = resolveSessionFilePath(input.file_path, sessionCwd);
+      if (isPathInSessionScope(resolvedPath, sessionCwd)) {
+        store.addChangedFile(sessionId, resolvedPath);
+      }
     }
   }
 }

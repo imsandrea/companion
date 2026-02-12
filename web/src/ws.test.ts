@@ -258,7 +258,7 @@ describe("handleMessage: assistant", () => {
     expect(changed?.has("/home/user/web/server/index.ts")).toBe(true);
   });
 
-  it("tracks changed files with absolute paths unchanged", () => {
+  it("ignores changed files outside the session cwd", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
 
@@ -284,7 +284,36 @@ describe("handleMessage: assistant", () => {
     });
 
     const changed = useStore.getState().changedFiles.get("s1");
-    expect(changed?.has("/Users/test/.claude/plans/example.md")).toBe(true);
+    expect(changed).toBeUndefined();
+  });
+
+  it("tracks changed files with absolute paths when inside cwd", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "msg-tool-3",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4-20250514",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool-3",
+            name: "Write",
+            input: { file_path: "/home/user/README.md" },
+          },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+    });
+
+    const changed = useStore.getState().changedFiles.get("s1");
+    expect(changed?.has("/home/user/README.md")).toBe(true);
   });
 });
 
