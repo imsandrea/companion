@@ -8,6 +8,7 @@ export function connectTerminal(
   onData: (data: Uint8Array) => void,
   onExit: (exitCode: number) => void,
   onError?: (message: string) => void,
+  onOpen?: () => void,
 ): void {
   disconnectTerminal();
 
@@ -20,6 +21,10 @@ export function connectTerminal(
 
   socket = new WebSocket(wsUrl);
   socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => {
+    onOpen?.();
+  };
 
   socket.onmessage = (event) => {
     if (event.data instanceof ArrayBuffer) {

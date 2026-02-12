@@ -1,15 +1,30 @@
 import type { ServerWebSocket } from "bun";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { SocketData } from "./ws-bridge.js";
+
+/** Bun's PTY terminal handle exposed on proc when spawned with `terminal` option */
+interface BunTerminalHandle {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  close(): void;
+}
 
 interface TerminalInstance {
   id: string;
   cwd: string;
   proc: ReturnType<typeof Bun.spawn>;
+  terminal: BunTerminalHandle;
   browserSockets: Set<ServerWebSocket<SocketData>>;
   cols: number;
   rows: number;
   orphanTimer: ReturnType<typeof setTimeout> | null;
+}
+
+function resolveShell(): string {
+  if (process.env.SHELL && existsSync(process.env.SHELL)) return process.env.SHELL;
+  if (existsSync("/bin/bash")) return "/bin/bash";
+  return "/bin/sh";
 }
 
 export class TerminalManager {
@@ -23,7 +38,7 @@ export class TerminalManager {
     }
 
     const id = randomUUID();
-    const shell = process.env.SHELL || "/bin/bash";
+    const shell = resolveShell();
     const sockets = new Set<ServerWebSocket<SocketData>>();
 
     const proc = Bun.spawn([shell, "-l"], {
@@ -59,7 +74,9 @@ export class TerminalManager {
       },
     });
 
-    this.instance = { id, cwd, proc, browserSockets: sockets, cols, rows, orphanTimer: null };
+    // Extract the terminal handle from the proc — Bun attaches it when spawned with `terminal` option
+    const terminal = (proc as any).terminal as BunTerminalHandle;
+    this.instance = { id, cwd, proc, terminal, browserSockets: sockets, cols, rows, orphanTimer: null };
     console.log(`[terminal] Spawned terminal ${id} in ${cwd} (${shell}, ${cols}x${rows})`);
 
     // Handle process exit
@@ -79,7 +96,7 @@ export class TerminalManager {
       const str = typeof msg === "string" ? msg : msg.toString();
       const parsed = JSON.parse(str);
       if (parsed.type === "input" && typeof parsed.data === "string") {
-        (this.instance.proc as any).terminal?.write?.(parsed.data);
+        this.instance.terminal.write(parsed.data);
       } else if (parsed.type === "resize" && typeof parsed.cols === "number" && typeof parsed.rows === "number") {
         this.resize(parsed.cols, parsed.rows);
       }
@@ -94,7 +111,7 @@ export class TerminalManager {
     this.instance.cols = cols;
     this.instance.rows = rows;
     try {
-      (this.instance.proc as any).terminal?.resize?.(cols, rows);
+      this.instance.terminal.resize(cols, rows);
     } catch {
       // resize not available or failed
     }

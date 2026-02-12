@@ -69,6 +69,12 @@ export function TerminalView({ cwd, onClose }: TerminalViewProps) {
           (errMsg) => {
             xterm.writeln(`\r\n[${errMsg}]`);
           },
+          () => {
+            // WebSocket is now open — send the actual fitted dimensions
+            // (ResizeObserver may have fired before the socket was ready)
+            fit.fit();
+            sendTerminalResize(xterm.cols, xterm.rows);
+          },
         );
       })
       .catch((err) => {
