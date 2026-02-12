@@ -11,6 +11,8 @@ import type { WorktreeTracker } from "./worktree-tracker.js";
 import * as envManager from "./env-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
+import { containerManager, type ContainerConfig, type ContainerInfo } from "./container-manager.js";
+import { DEFAULT_OPENROUTER_MODEL, getSettings, updateSettings } from "./settings-manager.js";
 import { getUsageLimits } from "./usage-limits.js";
 import {
   getUpdateState,
@@ -123,6 +125,22 @@ export function createRoutes(
         }
       }
 
+      // If container mode requested, create and start the container
+      let containerInfo: ContainerInfo | undefined;
+      if (body.container && backend === "claude") {
+        const cConfig: ContainerConfig = {
+          image: body.container.image || "companion-dev:latest",
+          ports: Array.isArray(body.container.ports)
+            ? body.container.ports.map(Number).filter((n: number) => n > 0)
+            : [],
+          volumes: body.container.volumes,
+          env: body.container.env,
+        };
+        // Use cwd-based name since we don't have sessionId yet
+        const containerId = crypto.randomUUID().slice(0, 8);
+        containerInfo = containerManager.createContainer(containerId, cwd, cConfig);
+      }
+
       const session = launcher.launch({
         model: body.model,
         permissionMode: body.permissionMode,
@@ -137,7 +155,14 @@ export function createRoutes(
         env: envVars,
         backendType: backend,
         worktreeInfo,
+        containerInfo,
       });
+
+      // Re-track container with real session ID
+      if (containerInfo) {
+        // The container was created with a temp ID; re-register under the real session ID
+        containerManager.retrack(containerInfo.containerId, session.sessionId);
+      }
 
       // Track the worktree mapping
       if (worktreeInfo) {
@@ -204,6 +229,9 @@ export function createRoutes(
     if (!killed)
       return c.json({ error: "Session not found or already exited" }, 404);
 
+    // Clean up container if any
+    containerManager.removeContainer(id);
+
     return c.json({ ok: true });
   });
 
@@ -218,6 +246,9 @@ export function createRoutes(
     const id = c.req.param("id");
     await launcher.kill(id);
 
+    // Clean up container if any
+    containerManager.removeContainer(id);
+
     // Clean up worktree if no other sessions use it (force: delete is destructive)
     const worktreeResult = cleanupWorktree(id, true);
 
@@ -230,6 +261,9 @@ export function createRoutes(
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     await launcher.kill(id);
+
+    // Clean up container if any
+    containerManager.removeContainer(id);
 
     // Clean up worktree if no other sessions use it
     const worktreeResult = cleanupWorktree(id, body.force);
@@ -307,6 +341,19 @@ export function createRoutes(
 
     // Claude models are hardcoded on the frontend
     return c.json({ error: "Use frontend defaults for this backend" }, 404);
+  });
+
+  // ─── Containers ─────────────────────────────────────────────────
+
+  api.get("/containers/status", (c) => {
+    const available = containerManager.checkDocker();
+    const version = containerManager.getDockerVersion();
+    return c.json({ available, version });
+  });
+
+  api.get("/containers/images", (c) => {
+    const images = containerManager.listImages();
+    return c.json(images);
   });
 
   // ─── Filesystem browsing ─────────────────────────────────────
@@ -527,6 +574,39 @@ export function createRoutes(
     const deleted = envManager.deleteEnv(c.req.param("slug"));
     if (!deleted) return c.json({ error: "Environment not found" }, 404);
     return c.json({ ok: true });
+  });
+
+  // ─── Settings (~/.companion/settings.json) ────────────────────────
+
+  api.get("/settings", (c) => {
+    const settings = getSettings();
+    return c.json({
+      openrouterApiKeyConfigured: !!settings.openrouterApiKey.trim(),
+      openrouterModel: settings.openrouterModel || DEFAULT_OPENROUTER_MODEL,
+    });
+  });
+
+  api.put("/settings", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    if (typeof body.openrouterApiKey !== "string") {
+      return c.json({ error: "openrouterApiKey is required" }, 400);
+    }
+    if (body.openrouterModel !== undefined && typeof body.openrouterModel !== "string") {
+      return c.json({ error: "openrouterModel must be a string" }, 400);
+    }
+
+    const settings = updateSettings({
+      openrouterApiKey: body.openrouterApiKey.trim(),
+      openrouterModel:
+        typeof body.openrouterModel === "string"
+          ? (body.openrouterModel.trim() || DEFAULT_OPENROUTER_MODEL)
+          : undefined,
+    });
+
+    return c.json({
+      openrouterApiKeyConfigured: !!settings.openrouterApiKey.trim(),
+      openrouterModel: settings.openrouterModel || DEFAULT_OPENROUTER_MODEL,
+    });
   });
 
   // ─── Git operations ─────────────────────────────────────────────────
