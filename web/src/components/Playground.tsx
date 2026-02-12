@@ -4,6 +4,7 @@ import { MessageBubble } from "./MessageBubble.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { DiffViewer } from "./DiffViewer.js";
 import { UpdateBanner } from "./UpdateBanner.js";
+import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { useStore } from "../store.js";
 import type { PermissionRequest, ChatMessage, ContentBlock } from "../types.js";
 import type { TaskItem } from "../types.js";
@@ -860,6 +861,14 @@ export function Playground() {
             </Card>
           </div>
         </Section>
+        {/* ─── CLAUDE.md Editor ──────────────────────────────── */}
+        <Section title="CLAUDE.md Editor" description="Modal for viewing and editing project CLAUDE.md instructions">
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Open editor button (from TopBar)">
+              <PlaygroundClaudeMdButton />
+            </Card>
+          </div>
+        </Section>
       </div>
     </div>
   );
@@ -1031,6 +1040,34 @@ function PlaygroundUpdateBanner({ updateInfo }: { updateInfo: UpdateInfo }) {
   }, [updateInfo]);
 
   return <UpdateBanner />;
+}
+
+// ─── Inline ClaudeMd Button (opens the real editor modal) ───────────────────
+
+function PlaygroundClaudeMdButton() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-cc-hover border border-cc-border hover:bg-cc-active transition-colors cursor-pointer"
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4 text-cc-primary">
+          <path d="M4 1.5a.5.5 0 01.5-.5h7a.5.5 0 01.354.146l2 2A.5.5 0 0114 3.5v11a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5v-13zm1 .5v12h8V4h-1.5a.5.5 0 01-.5-.5V2H5zm6 0v1h1l-1-1zM6.5 7a.5.5 0 000 1h5a.5.5 0 000-1h-5zm0 2a.5.5 0 000 1h5a.5.5 0 000-1h-5zm0 2a.5.5 0 000 1h3a.5.5 0 000-1h-3z" />
+        </svg>
+        <span className="text-xs font-medium text-cc-fg">Edit CLAUDE.md</span>
+      </button>
+      <span className="text-[11px] text-cc-muted">
+        Click to open the editor modal (uses current working directory)
+      </span>
+      <ClaudeMdEditor
+        cwd={typeof window !== "undefined" ? window.location.pathname.split("/").slice(0, -1).join("/") || "/" : "/"}
+        open={open}
+        onClose={() => setOpen(false)}
+      />
+    </div>
+  );
 }
 
 // ─── Inline TaskRow (avoids store dependency from TaskPanel) ────────────────

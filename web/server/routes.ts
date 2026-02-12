@@ -482,6 +482,56 @@ export function createRoutes(
     }
   });
 
+  /** Find CLAUDE.md files for a project (root + .claude/) */
+  api.get("/fs/claude-md", async (c) => {
+    const cwd = c.req.query("cwd");
+    if (!cwd) return c.json({ error: "cwd required" }, 400);
+
+    const candidates = [
+      join(cwd, "CLAUDE.md"),
+      join(cwd, ".claude", "CLAUDE.md"),
+    ];
+
+    const files: { path: string; content: string }[] = [];
+    for (const p of candidates) {
+      try {
+        const content = await readFile(p, "utf-8");
+        files.push({ path: p, content });
+      } catch {
+        // file doesn't exist — skip
+      }
+    }
+
+    return c.json({ cwd, files });
+  });
+
+  /** Create or update a CLAUDE.md file */
+  api.put("/fs/claude-md", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const { path: filePath, content } = body;
+    if (!filePath || typeof content !== "string") {
+      return c.json({ error: "path and content required" }, 400);
+    }
+    // Only allow writing CLAUDE.md files
+    const base = filePath.split("/").pop();
+    if (base !== "CLAUDE.md") {
+      return c.json({ error: "Can only write CLAUDE.md files" }, 400);
+    }
+    const absPath = resolve(filePath);
+    try {
+      // Ensure parent directory exists
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(dirname(absPath), { recursive: true });
+      await writeFile(absPath, content, "utf-8");
+      return c.json({ ok: true, path: absPath });
+    } catch (e: unknown) {
+      return c.json(
+        { error: e instanceof Error ? e.message : "Cannot write file" },
+        500,
+      );
+    }
+  });
+
   // ─── Environments (~/.companion/envs/) ────────────────────────────
 
   api.get("/envs", (c) => {
