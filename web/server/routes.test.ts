@@ -27,6 +27,9 @@ vi.mock("./git-utils.js", () => ({
   listBranches: vi.fn(() => []),
   listWorktrees: vi.fn(() => []),
   ensureWorktree: vi.fn(),
+  gitFetch: vi.fn(() => ({ success: true, output: "" })),
+  gitPull: vi.fn(() => ({ success: true, output: "" })),
+  checkoutBranch: vi.fn(),
   removeWorktree: vi.fn(),
   isWorktreeDirty: vi.fn(() => false),
 }));
@@ -37,6 +40,11 @@ vi.mock("./session-names.js", () => ({
   getAllNames: vi.fn(() => ({})),
   removeName: vi.fn(),
   _resetForTest: vi.fn(),
+}));
+
+const mockGetUsageLimits = vi.hoisted(() => vi.fn());
+vi.mock("./usage-limits.js", () => ({
+  getUsageLimits: mockGetUsageLimits,
 }));
 
 import { Hono } from "hono";
@@ -69,6 +77,9 @@ function createMockLauncher() {
 function createMockBridge() {
   return {
     closeSession: vi.fn(),
+    getSession: vi.fn(() => null),
+    getAllSessions: vi.fn(() => []),
+    getCodexRateLimits: vi.fn(() => null),
   } as any;
 }
 
@@ -197,6 +208,109 @@ describe("POST /api/sessions/create", () => {
     );
   });
 
+  it("fetches and pulls before create when branch matches current branch", async () => {
+    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
+      repoRoot: "/repo",
+      repoName: "my-repo",
+      currentBranch: "main",
+      defaultBranch: "main",
+      isWorktree: false,
+    });
+
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(gitUtils.gitFetch).toHaveBeenCalledWith("/repo");
+    expect(gitUtils.checkoutBranch).not.toHaveBeenCalled();
+    expect(gitUtils.gitPull).toHaveBeenCalledWith("/repo");
+  });
+
+  it("fetches, checks out selected branch, then pulls before create", async () => {
+    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
+      repoRoot: "/repo",
+      repoName: "my-repo",
+      currentBranch: "develop",
+      defaultBranch: "main",
+      isWorktree: false,
+    });
+
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(gitUtils.gitFetch).toHaveBeenCalledWith("/repo");
+    expect(gitUtils.checkoutBranch).toHaveBeenCalledWith("/repo", "main");
+    expect(gitUtils.gitPull).toHaveBeenCalledWith("/repo");
+    expect(vi.mocked(gitUtils.gitFetch).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(gitUtils.checkoutBranch).mock.invocationCallOrder[0],
+    );
+    expect(vi.mocked(gitUtils.checkoutBranch).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(gitUtils.gitPull).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("returns 500 and does not launch when fetch fails before create", async () => {
+    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
+      repoRoot: "/repo",
+      repoName: "my-repo",
+      currentBranch: "main",
+      defaultBranch: "main",
+      isWorktree: false,
+    });
+    vi.mocked(gitUtils.gitFetch).mockReturnValueOnce({
+      success: false,
+      output: "network error",
+    });
+
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
+    });
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json).toEqual({
+      error: "git fetch failed before session create: network error",
+    });
+    expect(gitUtils.gitPull).not.toHaveBeenCalled();
+    expect(launcher.launch).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 and does not launch when pull fails before create", async () => {
+    vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
+      repoRoot: "/repo",
+      repoName: "my-repo",
+      currentBranch: "main",
+      defaultBranch: "main",
+      isWorktree: false,
+    });
+    vi.mocked(gitUtils.gitPull).mockReturnValueOnce({
+      success: false,
+      output: "non-fast-forward",
+    });
+
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/repo", branch: "main" }),
+    });
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json).toEqual({
+      error: "git pull failed before session create: non-fast-forward",
+    });
+    expect(launcher.launch).not.toHaveBeenCalled();
+  });
+
   it("returns 500 when launch throws an error", async () => {
     launcher.launch.mockImplementation(() => {
       throw new Error("CLI binary not found");
@@ -241,9 +355,57 @@ describe("GET /api/sessions", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual([
-      { sessionId: "s1", state: "running", cwd: "/a", name: "Fix auth bug" },
-      { sessionId: "s2", state: "stopped", cwd: "/b" },
+      {
+        sessionId: "s1", state: "running", cwd: "/a", name: "Fix auth bug",
+        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
+      },
+      {
+        sessionId: "s2", state: "stopped", cwd: "/b",
+        gitBranch: "", gitAhead: 0, gitBehind: 0, totalLinesAdded: 0, totalLinesRemoved: 0,
+      },
     ]);
+  });
+
+  it("enriches sessions with git data from bridge state", async () => {
+    const sessions = [
+      { sessionId: "s1", state: "running", cwd: "/a" },
+      { sessionId: "s2", state: "running", cwd: "/b" },
+    ];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    bridge.getAllSessions.mockReturnValue([
+      {
+        session_id: "s1",
+        git_branch: "feature/auth",
+        git_ahead: 3,
+        git_behind: 1,
+        total_lines_added: 42,
+        total_lines_removed: 7,
+      },
+    ]);
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // s1 should have bridge git data
+    expect(json[0]).toMatchObject({
+      sessionId: "s1",
+      gitBranch: "feature/auth",
+      gitAhead: 3,
+      gitBehind: 1,
+      totalLinesAdded: 42,
+      totalLinesRemoved: 7,
+    });
+    // s2 has no bridge data — defaults to empty/zero
+    expect(json[1]).toMatchObject({
+      sessionId: "s2",
+      gitBranch: "",
+      gitAhead: 0,
+      gitBehind: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+    });
   });
 });
 
@@ -669,6 +831,67 @@ describe("GET /api/fs/home", () => {
     expect(typeof json.home).toBe("string");
     expect(typeof json.cwd).toBe("string");
   });
+
+  it("returns home as cwd when process.cwd() is the package root", async () => {
+    const origCwd = process.cwd;
+    const origEnv = process.env.__VIBE_PACKAGE_ROOT;
+    try {
+      process.env.__VIBE_PACKAGE_ROOT = "/opt/companion";
+      process.cwd = () => "/opt/companion";
+      const res = await app.request("/api/fs/home", { method: "GET" });
+      const json = await res.json();
+      expect(json.cwd).toBe(json.home);
+    } finally {
+      process.cwd = origCwd;
+      process.env.__VIBE_PACKAGE_ROOT = origEnv;
+    }
+  });
+
+  it("returns home as cwd when process.cwd() is inside the package root", async () => {
+    const origCwd = process.cwd;
+    const origEnv = process.env.__VIBE_PACKAGE_ROOT;
+    try {
+      process.env.__VIBE_PACKAGE_ROOT = "/opt/companion";
+      process.cwd = () => "/opt/companion/node_modules/.bin";
+      const res = await app.request("/api/fs/home", { method: "GET" });
+      const json = await res.json();
+      expect(json.cwd).toBe(json.home);
+    } finally {
+      process.cwd = origCwd;
+      process.env.__VIBE_PACKAGE_ROOT = origEnv;
+    }
+  });
+
+  it("returns actual cwd when launched from a project directory", async () => {
+    const origCwd = process.cwd;
+    const origEnv = process.env.__VIBE_PACKAGE_ROOT;
+    try {
+      process.env.__VIBE_PACKAGE_ROOT = "/opt/companion";
+      process.cwd = () => "/Users/testuser/my-project";
+      const res = await app.request("/api/fs/home", { method: "GET" });
+      const json = await res.json();
+      expect(json.cwd).toBe("/Users/testuser/my-project");
+    } finally {
+      process.cwd = origCwd;
+      process.env.__VIBE_PACKAGE_ROOT = origEnv;
+    }
+  });
+
+  it("returns home as cwd when process.cwd() equals home directory", async () => {
+    const { homedir } = await import("node:os");
+    const origCwd = process.cwd;
+    const origEnv = process.env.__VIBE_PACKAGE_ROOT;
+    try {
+      delete process.env.__VIBE_PACKAGE_ROOT;
+      process.cwd = () => homedir();
+      const res = await app.request("/api/fs/home", { method: "GET" });
+      const json = await res.json();
+      expect(json.cwd).toBe(json.home);
+    } finally {
+      process.cwd = origCwd;
+      process.env.__VIBE_PACKAGE_ROOT = origEnv;
+    }
+  });
 });
 
 describe("GET /api/fs/diff", () => {
@@ -843,5 +1066,94 @@ describe("POST /api/sessions/create with backend", () => {
     expect(launcher.launch).toHaveBeenCalledWith(
       expect.objectContaining({ backendType: "claude" }),
     );
+  });
+});
+
+// ─── Per-session usage limits ─────────────────────────────────────────────────
+
+describe("GET /api/sessions/:id/usage-limits", () => {
+  it("returns Claude usage limits for a claude session", async () => {
+    bridge.getSession.mockReturnValue({ backendType: "claude" });
+    mockGetUsageLimits.mockResolvedValue({
+      five_hour: { utilization: 42, resets_at: "2025-01-01T12:00:00Z" },
+      seven_day: { utilization: 15, resets_at: null },
+      extra_usage: null,
+    });
+
+    const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      five_hour: { utilization: 42, resets_at: "2025-01-01T12:00:00Z" },
+      seven_day: { utilization: 15, resets_at: null },
+      extra_usage: null,
+    });
+    expect(mockGetUsageLimits).toHaveBeenCalled();
+  });
+
+  it("returns mapped Codex rate limits for a codex session", async () => {
+    bridge.getSession.mockReturnValue({ backendType: "codex" });
+    bridge.getCodexRateLimits.mockReturnValue({
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1730947200 },
+      secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1731552000 },
+    });
+
+    const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.five_hour).toEqual({
+      utilization: 25,
+      resets_at: new Date(1730947200 * 1000).toISOString(),
+    });
+    expect(json.seven_day).toEqual({
+      utilization: 10,
+      resets_at: new Date(1731552000 * 1000).toISOString(),
+    });
+    expect(json.extra_usage).toBeNull();
+    expect(mockGetUsageLimits).not.toHaveBeenCalled();
+  });
+
+  it("returns empty limits when codex session has no rate limits yet", async () => {
+    bridge.getSession.mockReturnValue({ backendType: "codex" });
+    bridge.getCodexRateLimits.mockReturnValue(null);
+
+    const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null });
+  });
+
+  it("handles codex rate limits with null secondary", async () => {
+    bridge.getSession.mockReturnValue({ backendType: "codex" });
+    bridge.getCodexRateLimits.mockReturnValue({
+      primary: { usedPercent: 50, windowDurationMins: 300, resetsAt: 0 },
+      secondary: null,
+    });
+
+    const res = await app.request("/api/sessions/s1/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.five_hour).toEqual({ utilization: 50, resets_at: null });
+    expect(json.seven_day).toBeNull();
+  });
+
+  it("falls back to Claude limits when session is not found", async () => {
+    bridge.getSession.mockReturnValue(null);
+    mockGetUsageLimits.mockResolvedValue({
+      five_hour: null,
+      seven_day: null,
+      extra_usage: null,
+    });
+
+    const res = await app.request("/api/sessions/unknown/usage-limits", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ five_hour: null, seven_day: null, extra_usage: null });
+    expect(mockGetUsageLimits).toHaveBeenCalled();
   });
 });

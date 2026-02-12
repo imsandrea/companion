@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
-import { connectSession, disconnectSession } from "../ws.js";
+import { connectSession, connectAllSessions, disconnectSession } from "../ws.js";
 import { EnvManager } from "./EnvManager.js";
+import { ProjectGroup } from "./ProjectGroup.js";
+import { SessionItem } from "./SessionItem.js";
+import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
 export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -25,6 +28,8 @@ export function Sidebar() {
   const sessionNames = useStore((s) => s.sessionNames);
   const recentlyRenamed = useStore((s) => s.recentlyRenamed);
   const pendingPermissions = useStore((s) => s.pendingPermissions);
+  const collapsedProjects = useStore((s) => s.collapsedProjects);
+  const toggleProjectCollapse = useStore((s) => s.toggleProjectCollapse);
 
   // Poll for SDK sessions on mount
   useEffect(() => {
@@ -34,6 +39,8 @@ export function Sidebar() {
         const list = await api.listSessions();
         if (active) {
           useStore.getState().setSdkSessions(list);
+          // Connect all active sessions so we receive notifications for all of them
+          connectAllSessions(list);
           // Hydrate session names from server (server is source of truth for auto-generated names)
           const store = useStore.getState();
           for (const s of list) {
@@ -63,11 +70,8 @@ export function Sidebar() {
 
   function handleSelectSession(sessionId: string) {
     if (currentSessionId === sessionId) return;
-    // Disconnect from old session, connect to new
-    if (currentSessionId) {
-      disconnectSession(currentSessionId);
-    }
     setCurrentSession(sessionId);
+    // Ensure connected (idempotent — no-op if already connected)
     connectSession(sessionId);
     // Close sidebar on mobile
     if (window.innerWidth < 768) {
@@ -76,9 +80,6 @@ export function Sidebar() {
   }
 
   function handleNewSession() {
-    if (currentSessionId) {
-      disconnectSession(currentSessionId);
-    }
     useStore.getState().newSession();
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
@@ -105,6 +106,11 @@ export function Sidebar() {
   function cancelRename() {
     setEditingSessionId(null);
     setEditingName("");
+  }
+
+  function handleStartRename(id: string, currentName: string) {
+    setEditingSessionId(id);
+    setEditingName(currentName);
   }
 
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
@@ -180,25 +186,27 @@ export function Sidebar() {
   for (const id of sessions.keys()) allSessionIds.add(id);
   for (const s of sdkSessions) allSessionIds.add(s.sessionId);
 
-  const allSessionList = Array.from(allSessionIds).map((id) => {
+  const allSessionList: SessionItemType[] = Array.from(allSessionIds).map((id) => {
     const bridgeState = sessions.get(id);
     const sdkInfo = sdkSessions.find((s) => s.sessionId === id);
     return {
       id,
       model: bridgeState?.model || sdkInfo?.model || "",
       cwd: bridgeState?.cwd || sdkInfo?.cwd || "",
-      gitBranch: bridgeState?.git_branch || "",
+      gitBranch: bridgeState?.git_branch || sdkInfo?.gitBranch || "",
       isWorktree: bridgeState?.is_worktree || sdkInfo?.isWorktree || false,
-      gitAhead: bridgeState?.git_ahead || 0,
-      gitBehind: bridgeState?.git_behind || 0,
-      linesAdded: bridgeState?.total_lines_added || 0,
-      linesRemoved: bridgeState?.total_lines_removed || 0,
+      gitAhead: bridgeState?.git_ahead || sdkInfo?.gitAhead || 0,
+      gitBehind: bridgeState?.git_behind || sdkInfo?.gitBehind || 0,
+      linesAdded: bridgeState?.total_lines_added || sdkInfo?.totalLinesAdded || 0,
+      linesRemoved: bridgeState?.total_lines_removed || sdkInfo?.totalLinesRemoved || 0,
       isConnected: cliConnected.get(id) ?? false,
       status: sessionStatus.get(id) ?? null,
       sdkState: sdkInfo?.state ?? null,
       createdAt: sdkInfo?.createdAt ?? 0,
       archived: sdkInfo?.archived ?? false,
       backendType: bridgeState?.backend_type || sdkInfo?.backendType || "claude",
+      repoRoot: bridgeState?.repo_root || sdkInfo?.repoRoot || "",
+      permCount: pendingPermissions.get(id)?.size ?? 0,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
@@ -207,172 +215,26 @@ export function Sidebar() {
   const currentSession = currentSessionId ? allSessionList.find((s) => s.id === currentSessionId) : null;
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
-  function renderSessionItem(s: typeof allSessionList[number], options?: { isArchived?: boolean }) {
-    const isActive = currentSessionId === s.id;
-    const name = sessionNames.get(s.id);
-    const shortId = s.id.slice(0, 8);
-    const label = name || s.model || shortId;
-    const dirName = s.cwd ? s.cwd.split("/").pop() : "";
-    const isRunning = s.status === "running";
-    const isCompacting = s.status === "compacting";
-    const isEditing = editingSessionId === s.id;
-    const permCount = pendingPermissions.get(s.id)?.size ?? 0;
-    const archived = options?.isArchived;
+  // Group active sessions by project
+  const projectGroups = useMemo(
+    () => groupSessionsByProject(activeSessions),
+    [activeSessions],
+  );
 
-    return (
-      <div key={s.id} className={`relative group ${archived ? "opacity-60" : ""}`}>
-        <button
-          onClick={() => handleSelectSession(s.id)}
-          onDoubleClick={(e) => {
-            e.preventDefault();
-            setEditingSessionId(s.id);
-            setEditingName(label);
-          }}
-          className={`w-full px-3 py-2.5 ${archived ? "pr-14" : "pr-8"} text-left rounded-[10px] transition-all duration-100 cursor-pointer ${
-            isActive
-              ? "bg-cc-active"
-              : "hover:bg-cc-hover"
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            <span className="relative flex shrink-0">
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  archived
-                    ? "bg-cc-muted opacity-40"
-                    : permCount > 0
-                    ? "bg-cc-warning"
-                    : s.sdkState === "exited"
-                    ? "bg-cc-muted opacity-40"
-                    : s.isConnected
-                    ? isRunning
-                      ? "bg-cc-success"
-                      : isCompacting
-                      ? "bg-cc-warning"
-                      : "bg-cc-success opacity-60"
-                    : "bg-cc-muted opacity-40"
-                }`}
-              />
-              {!archived && permCount > 0 && (
-                <span className="absolute inset-0 w-2 h-2 rounded-full bg-cc-warning/40 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
-              )}
-              {!archived && permCount === 0 && isRunning && s.isConnected && (
-                <span className="absolute inset-0 w-2 h-2 rounded-full bg-cc-success/40 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
-              )}
-            </span>
-            {isEditing ? (
-              <input
-                ref={editInputRef}
-                value={editingName}
-                onChange={(e) => setEditingName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    confirmRename();
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    cancelRename();
-                  }
-                  e.stopPropagation();
-                }}
-                onBlur={confirmRename}
-                onClick={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-                className="text-[13px] font-medium flex-1 text-cc-fg bg-transparent border border-cc-border rounded-md px-1 py-0 outline-none focus:border-cc-primary/50 min-w-0"
-              />
-            ) : (
-              <span
-                className={`text-[13px] font-medium truncate flex-1 text-cc-fg ${recentlyRenamed.has(s.id) ? "animate-name-appear" : ""} flex items-center gap-1.5`}
-                onAnimationEnd={() => useStore.getState().clearRecentlyRenamed(s.id)}
-              >
-                <span className="truncate">{label}</span>
-                {s.backendType === "codex" && (
-                  <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">codex</span>
-                )}
-              </span>
-            )}
-          </div>
-          {dirName && (
-            <p className="text-[11px] text-cc-muted truncate mt-0.5 ml-4">
-              {dirName}
-            </p>
-          )}
-          {s.gitBranch && (
-            <div className="flex items-center gap-1.5 mt-0.5 ml-4 text-[11px] text-cc-muted">
-              <span className="flex items-center gap-1 truncate">
-                {s.isWorktree ? (
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 shrink-0 opacity-60">
-                    <path d="M5 3.25a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 2.122a2.25 2.25 0 10-1.5 0v5.256a2.25 2.25 0 101.5 0V5.372zM4.25 12a.75.75 0 100 1.5.75.75 0 000-1.5zm7.5-9.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122V7A2.5 2.5 0 0110 9.5H6a1 1 0 000 2h4a2.5 2.5 0 012.5 2.5v.628a2.25 2.25 0 11-1.5 0V14a1 1 0 00-1-1H6a2.5 2.5 0 01-2.5-2.5V10a2.5 2.5 0 012.5-2.5h4a1 1 0 001-1V5.372a2.25 2.25 0 01-1.5-2.122z" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 shrink-0 opacity-60">
-                    <path d="M11.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.116.862a2.25 2.25 0 10-.862.862A4.48 4.48 0 007.25 7.5h-1.5A2.25 2.25 0 003.5 9.75v.318a2.25 2.25 0 101.5 0V9.75a.75.75 0 01.75-.75h1.5a5.98 5.98 0 003.884-1.435A2.25 2.25 0 109.634 3.362zM4.25 12a.75.75 0 100 1.5.75.75 0 000-1.5z" />
-                  </svg>
-                )}
-                <span className="truncate">{s.gitBranch}</span>
-                {s.isWorktree && (
-                  <span className="text-[9px] bg-cc-primary/10 text-cc-primary px-0.5 rounded">wt</span>
-                )}
-              </span>
-              {(s.gitAhead > 0 || s.gitBehind > 0) && (
-                <span className="flex items-center gap-0.5 text-[10px]">
-                  {s.gitAhead > 0 && <span className="text-green-500">{s.gitAhead}&#8593;</span>}
-                  {s.gitBehind > 0 && <span className="text-cc-warning">{s.gitBehind}&#8595;</span>}
-                </span>
-              )}
-              {(s.linesAdded > 0 || s.linesRemoved > 0) && (
-                <span className="flex items-center gap-1 shrink-0">
-                  <span className="text-green-500">+{s.linesAdded}</span>
-                  <span className="text-red-400">-{s.linesRemoved}</span>
-                </span>
-              )}
-            </div>
-          )}
-        </button>
-        {!archived && permCount > 0 && (
-          <span className="absolute right-2 top-1/2 -translate-y-1/2 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cc-warning text-white text-[10px] font-bold leading-none px-1 group-hover:opacity-0 transition-opacity pointer-events-none">
-            {permCount}
-          </span>
-        )}
-        {archived ? (
-          <>
-            {/* Unarchive button */}
-            <button
-              onClick={(e) => handleUnarchiveSession(e, s.id)}
-              className="absolute right-8 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
-              title="Restore session"
-            >
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-                <path d="M8 10V3M5 5l3-3 3 3" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M3 13h10" strokeLinecap="round" />
-              </svg>
-            </button>
-            {/* Delete button */}
-            <button
-              onClick={(e) => handleDeleteSession(e, s.id)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
-              title="Delete permanently"
-            >
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-                <path d="M4 4l8 8M12 4l-8 8" />
-              </svg>
-            </button>
-          </>
-        ) : (
-          <button
-            onClick={(e) => handleArchiveSession(e, s.id)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
-            title="Archive session"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-              <path d="M3 3h10v2H3zM4 5v7a1 1 0 001 1h6a1 1 0 001-1V5" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M6.5 8h3" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-    );
-  }
+  // Shared props for SessionItem / ProjectGroup
+  const sessionItemProps = {
+    onSelect: handleSelectSession,
+    onStartRename: handleStartRename,
+    onArchive: handleArchiveSession,
+    onUnarchive: handleUnarchiveSession,
+    onDelete: handleDeleteSession,
+    editingSessionId,
+    editingName,
+    setEditingName,
+    onConfirmRename: confirmRename,
+    onCancelRename: cancelRename,
+    editInputRef,
+  };
 
   return (
     <aside className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
@@ -432,9 +294,20 @@ export function Sidebar() {
           </p>
         ) : (
           <>
-            <div className="space-y-0.5">
-              {activeSessions.map((s) => renderSessionItem(s))}
-            </div>
+            {projectGroups.map((group, i) => (
+              <ProjectGroup
+                key={group.key}
+                group={group}
+                isCollapsed={collapsedProjects.has(group.key)}
+                onToggleCollapse={toggleProjectCollapse}
+                currentSessionId={currentSessionId}
+                sessionNames={sessionNames}
+                pendingPermissions={pendingPermissions}
+                recentlyRenamed={recentlyRenamed}
+                isFirst={i === 0}
+                {...sessionItemProps}
+              />
+            ))}
 
             {archivedSessions.length > 0 && (
               <div className="mt-2 pt-2 border-t border-cc-border">
@@ -449,7 +322,18 @@ export function Sidebar() {
                 </button>
                 {showArchived && (
                   <div className="space-y-0.5 mt-1">
-                    {archivedSessions.map((s) => renderSessionItem(s, { isArchived: true }))}
+                    {archivedSessions.map((s) => (
+                      <SessionItem
+                        key={s.id}
+                        session={s}
+                        isActive={currentSessionId === s.id}
+                        isArchived
+                        sessionName={sessionNames.get(s.id)}
+                        permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                        isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                        {...sessionItemProps}
+                      />
+                    ))}
                   </div>
                 )}
               </div>

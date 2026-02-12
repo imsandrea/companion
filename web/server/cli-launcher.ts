@@ -31,6 +31,20 @@ export interface SdkSessionInfo {
   name?: string;
   /** Which backend this session uses */
   backendType?: BackendType;
+  /** Git branch from bridge state (enriched by REST API) */
+  gitBranch?: string;
+  /** Git ahead count (enriched by REST API) */
+  gitAhead?: number;
+  /** Git behind count (enriched by REST API) */
+  gitBehind?: number;
+  /** Total lines added (enriched by REST API) */
+  totalLinesAdded?: number;
+  /** Total lines removed (enriched by REST API) */
+  totalLinesRemoved?: number;
+  /** Whether internet/web search is enabled for Codex sessions */
+  codexInternetAccess?: boolean;
+  /** Sandbox mode selected for Codex sessions */
+  codexSandbox?: "workspace-write" | "danger-full-access";
 }
 
 export interface LaunchOptions {
@@ -42,6 +56,10 @@ export interface LaunchOptions {
   allowedTools?: string[];
   env?: Record<string, string>;
   backendType?: BackendType;
+  /** Codex sandbox mode. */
+  codexSandbox?: "workspace-write" | "danger-full-access";
+  /** Whether Codex internet/web search should be enabled for this session. */
+  codexInternetAccess?: boolean;
   /** Pre-resolved worktree info from the session creation flow */
   worktreeInfo?: {
     isWorktree: boolean;
@@ -139,6 +157,11 @@ export class CliLauncher {
       backendType,
     };
 
+    if (backendType === "codex") {
+      info.codexInternetAccess = options.codexInternetAccess === true;
+      info.codexSandbox = options.codexSandbox;
+    }
+
     // Store worktree metadata if provided
     if (options.worktreeInfo) {
       info.isWorktree = options.worktreeInfo.isWorktree;
@@ -189,6 +212,8 @@ export class CliLauncher {
         model: info.model,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
+        codexSandbox: info.codexSandbox,
+        codexInternetAccess: info.codexInternetAccess,
       });
     } else {
       this.spawnCLI(sessionId, info, {
@@ -317,6 +342,8 @@ export class CliLauncher {
     }
 
     const args: string[] = ["app-server"];
+    const internetEnabled = options.codexInternetAccess === true;
+    args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
 
     const env: Record<string, string | undefined> = {
       ...process.env,
@@ -349,6 +376,7 @@ export class CliLauncher {
       cwd: info.cwd,
       approvalMode: options.permissionMode,
       threadId: info.cliSessionId,
+      sandbox: options.codexSandbox,
     });
 
     // Handle init errors — mark session as exited so UI shows failure

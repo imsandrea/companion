@@ -47,6 +47,17 @@ interface CodexItem {
   [key: string]: unknown;
 }
 
+/** Safely extract a string kind from a Codex file change entry.
+ *  Codex may send kind as a string ("create") or as an object ({ type: "modify" }). */
+function safeKind(kind: unknown): string {
+  if (typeof kind === "string") return kind;
+  if (kind && typeof kind === "object" && "type" in kind) {
+    const t = (kind as Record<string, unknown>).type;
+    if (typeof t === "string") return t;
+  }
+  return "modify";
+}
+
 interface CodexAgentMessageItem extends CodexItem {
   type: "agentMessage";
   text?: string;
@@ -63,7 +74,7 @@ interface CodexCommandExecutionItem extends CodexItem {
 
 interface CodexFileChangeItem extends CodexItem {
   type: "fileChange";
-  changes?: Array<{ path: string; kind: "create" | "modify" | "delete"; diff?: string }>;
+  changes?: Array<{ path: string; kind: unknown; diff?: string }>;
   status: "inProgress" | "completed" | "failed" | "declined";
 }
 
@@ -99,6 +110,7 @@ export interface CodexAdapterOptions {
   model?: string;
   cwd?: string;
   approvalMode?: string;
+  sandbox?: "workspace-write" | "danger-full-access";
   /** If provided, resume an existing thread instead of starting a new one. */
   threadId?: string;
 }
@@ -110,7 +122,7 @@ class JsonRpcTransport {
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private notificationHandler: ((method: string, params: Record<string, unknown>) => void) | null = null;
   private requestHandler: ((method: string, id: number, params: Record<string, unknown>) => void) | null = null;
-  private writer: WritableStream<Uint8Array>;
+  private writer: WritableStreamDefaultWriter<Uint8Array>;
   private connected = true;
   private buffer = "";
 
@@ -119,16 +131,20 @@ class JsonRpcTransport {
     stdout: ReadableStream<Uint8Array>,
   ) {
     // Handle both Bun subprocess stdin types
+    let writable: WritableStream<Uint8Array>;
     if ("write" in stdin && typeof stdin.write === "function") {
       // Bun's subprocess stdin has a .write() method directly
-      this.writer = new WritableStream({
+      writable = new WritableStream({
         write(chunk) {
           (stdin as { write(data: Uint8Array): number }).write(chunk);
         },
       });
     } else {
-      this.writer = stdin as WritableStream<Uint8Array>;
+      writable = stdin as WritableStream<Uint8Array>;
     }
+    // Acquire writer once and hold it — avoids "WritableStream is locked" race
+    // when concurrent async calls (e.g. rateLimits + turn/start) overlap.
+    this.writer = writable.getWriter();
 
     this.readStdout(stdout);
   }
@@ -238,13 +254,7 @@ class JsonRpcTransport {
   }
 
   private async writeRaw(data: string): Promise<void> {
-    const encoder = new TextEncoder();
-    const writer = this.writer.getWriter();
-    try {
-      await writer.write(encoder.encode(data));
-    } finally {
-      writer.releaseLock();
-    }
+    await this.writer.write(new TextEncoder().encode(data));
   }
 }
 
@@ -288,6 +298,16 @@ export class CodexAdapter {
   // Pending approval requests (Codex sends these as JSON-RPC requests with an id)
   private pendingApprovals = new Map<string, number>(); // request_id -> JSON-RPC id
 
+  // Track request types that need different response formats
+  private pendingUserInputQuestionIds = new Map<string, string[]>(); // request_id -> ordered Codex question IDs
+  private pendingReviewDecisions = new Set<string>(); // request_ids that need ReviewDecision format
+
+  // Codex account rate limits (fetched after init, updated via notification)
+  private _rateLimits: {
+    primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
+    secondary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
+  } | null = null;
+
   constructor(proc: Subprocess, sessionId: string, options: CodexAdapterOptions = {}) {
     this.proc = proc;
     this.sessionId = sessionId;
@@ -317,6 +337,10 @@ export class CodexAdapter {
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
+
+  getRateLimits() {
+    return this._rateLimits;
+  }
 
   sendBrowserMessage(msg: BrowserOutgoingMessage): boolean {
     // Queue messages if not yet initialized (init is async)
@@ -420,7 +444,7 @@ export class CodexAdapter {
           model: this.options.model,
           cwd: this.options.cwd,
           approvalPolicy: this.mapApprovalPolicy(this.options.approvalMode),
-          sandbox: this.mapSandboxPolicy(this.options.approvalMode),
+          sandbox: this.options.sandbox || this.mapSandboxPolicy(this.options.approvalMode),
         }) as { thread: { id: string } };
         this.threadId = resumeResult.thread.id;
       } else {
@@ -429,7 +453,7 @@ export class CodexAdapter {
           model: this.options.model,
           cwd: this.options.cwd,
           approvalPolicy: this.mapApprovalPolicy(this.options.approvalMode),
-          sandbox: this.mapSandboxPolicy(this.options.approvalMode),
+          sandbox: this.options.sandbox || this.mapSandboxPolicy(this.options.approvalMode),
         }) as { thread: { id: string } };
         this.threadId = threadResult.thread.id;
       }
@@ -468,6 +492,11 @@ export class CodexAdapter {
       };
 
       this.emit({ type: "session_init", session: state });
+
+      // Fetch initial rate limits (non-blocking — don't fail init if this errors)
+      this.transport.call("account/rateLimits/read", {}).then((result) => {
+        this.updateRateLimits(result as Record<string, unknown>);
+      }).catch(() => { /* best-effort */ });
 
       // Flush any messages that were queued during initialization
       if (this.pendingOutgoing.length > 0) {
@@ -525,7 +554,7 @@ export class CodexAdapter {
   }
 
   private async handleOutgoingPermissionResponse(
-    msg: { type: "permission_response"; request_id: string; behavior: "allow" | "deny" },
+    msg: { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown> },
   ): Promise<void> {
     const jsonRpcId = this.pendingApprovals.get(msg.request_id);
     if (jsonRpcId === undefined) {
@@ -535,6 +564,40 @@ export class CodexAdapter {
 
     this.pendingApprovals.delete(msg.request_id);
 
+    // User input requests (item/tool/requestUserInput) need ToolRequestUserInputResponse
+    const questionIds = this.pendingUserInputQuestionIds.get(msg.request_id);
+    if (questionIds) {
+      this.pendingUserInputQuestionIds.delete(msg.request_id);
+
+      if (msg.behavior === "deny") {
+        // Respond with empty answers on deny
+        await this.transport.respond(jsonRpcId, { answers: {} });
+        return;
+      }
+
+      // Convert browser answers (keyed by index "0","1",...) to Codex format (keyed by question ID)
+      const browserAnswers = msg.updated_input?.answers as Record<string, string> || {};
+      const codexAnswers: Record<string, { answers: string[] }> = {};
+      for (let i = 0; i < questionIds.length; i++) {
+        const answer = browserAnswers[String(i)];
+        if (answer !== undefined) {
+          codexAnswers[questionIds[i]] = { answers: [answer] };
+        }
+      }
+
+      await this.transport.respond(jsonRpcId, { answers: codexAnswers });
+      return;
+    }
+
+    // Review decisions (applyPatchApproval / execCommandApproval) need ReviewDecision
+    if (this.pendingReviewDecisions.has(msg.request_id)) {
+      this.pendingReviewDecisions.delete(msg.request_id);
+      const decision = msg.behavior === "allow" ? "approved" : "denied";
+      await this.transport.respond(jsonRpcId, { decision });
+      return;
+    }
+
+    // Standard item/*/requestApproval — uses accept/decline
     const decision = msg.behavior === "allow" ? "accept" : "decline";
     await this.transport.respond(jsonRpcId, { decision });
   }
@@ -616,8 +679,10 @@ export class CodexAdapter {
         break;
       case "account/updated":
       case "account/login/completed":
-      case "account/rateLimits/updated":
         // Auth events
+        break;
+      case "account/rateLimits/updated":
+        this.updateRateLimits(params);
         break;
       case "codex/event/stream_error": {
         const msg = params.msg as { message?: string } | undefined;
@@ -659,6 +724,22 @@ export class CodexAdapter {
           break;
         case "item/mcpToolCall/requestApproval":
           this.handleMcpToolCallApproval(id, params);
+          break;
+        case "item/tool/call":
+          this.handleDynamicToolCall(id, params);
+          break;
+        case "item/tool/requestUserInput":
+          this.handleUserInputRequest(id, params);
+          break;
+        case "applyPatchApproval":
+          this.handleApplyPatchApproval(id, params);
+          break;
+        case "execCommandApproval":
+          this.handleExecCommandApproval(id, params);
+          break;
+        case "account/chatgptAuthTokens/refresh":
+          console.warn("[codex-adapter] Auth token refresh not supported");
+          this.transport.respond(id, { error: "not supported" });
           break;
         default:
           console.log(`[codex-adapter] Unhandled request: ${method}`);
@@ -738,6 +819,111 @@ export class CodexAdapter {
     this.emit({ type: "permission_request", request: perm });
   }
 
+  private handleDynamicToolCall(jsonRpcId: number, params: Record<string, unknown>): void {
+    const callId = params.callId as string || `dynamic-${randomUUID()}`;
+    const toolName = params.tool as string || "unknown_dynamic_tool";
+    const toolArgs = params.arguments as Record<string, unknown> || {};
+
+    console.log(`[codex-adapter] Dynamic tool call received: ${toolName} (callId=${callId})`);
+
+    // Emit tool_use + tool_result to browser so the user sees what was attempted
+    this.emitToolUseTracked(callId, `dynamic:${toolName}`, toolArgs);
+    this.emitToolResult(
+      callId,
+      `Dynamic tool "${toolName}" is not supported by this client.`,
+      true,
+    );
+
+    // Respond to Codex with a valid DynamicToolCallResponse
+    this.transport.respond(jsonRpcId, {
+      contentItems: [{ type: "inputText", text: "Dynamic tool execution is not supported by this client" }],
+      success: false,
+    });
+  }
+
+  private handleUserInputRequest(jsonRpcId: number, params: Record<string, unknown>): void {
+    const requestId = `codex-userinput-${randomUUID()}`;
+    this.pendingApprovals.set(requestId, jsonRpcId);
+
+    const questions = params.questions as Array<{
+      id: string; header: string; question: string;
+      isOther: boolean; isSecret: boolean;
+      options: Array<{ label: string; description: string }> | null;
+    }> || [];
+
+    // Store question IDs so we can map browser indices back to Codex IDs in the response
+    this.pendingUserInputQuestionIds.set(requestId, questions.map((q) => q.id));
+
+    // Convert to our AskUserQuestion format (matches AskUserQuestionDisplay component)
+    const perm: PermissionRequest = {
+      request_id: requestId,
+      tool_name: "AskUserQuestion",
+      input: {
+        questions: questions.map((q) => ({
+          header: q.header,
+          question: q.question,
+          options: q.options?.map((o) => ({ label: o.label, description: o.description })) || [],
+        })),
+      },
+      description: questions[0]?.question || "User input requested",
+      tool_use_id: params.itemId as string || requestId,
+      timestamp: Date.now(),
+    };
+
+    this.emit({ type: "permission_request", request: perm });
+  }
+
+  private handleApplyPatchApproval(jsonRpcId: number, params: Record<string, unknown>): void {
+    const requestId = `codex-patch-${randomUUID()}`;
+    this.pendingApprovals.set(requestId, jsonRpcId);
+    this.pendingReviewDecisions.add(requestId);
+
+    const fileChanges = params.fileChanges as Record<string, unknown> || {};
+    const filePaths = Object.keys(fileChanges);
+    const reason = params.reason as string | null;
+
+    const perm: PermissionRequest = {
+      request_id: requestId,
+      tool_name: "Edit",
+      input: {
+        file_paths: filePaths,
+        ...(reason && { reason }),
+      },
+      description: reason || (filePaths.length > 0
+        ? `Codex wants to modify: ${filePaths.join(", ")}`
+        : "Codex wants to modify files"),
+      tool_use_id: params.callId as string || requestId,
+      timestamp: Date.now(),
+    };
+
+    this.emit({ type: "permission_request", request: perm });
+  }
+
+  private handleExecCommandApproval(jsonRpcId: number, params: Record<string, unknown>): void {
+    const requestId = `codex-exec-${randomUUID()}`;
+    this.pendingApprovals.set(requestId, jsonRpcId);
+    this.pendingReviewDecisions.add(requestId);
+
+    const command = params.command as string[] || [];
+    const commandStr = command.join(" ");
+    const cwd = params.cwd as string || this.options.cwd || "";
+    const reason = params.reason as string | null;
+
+    const perm: PermissionRequest = {
+      request_id: requestId,
+      tool_name: "Bash",
+      input: {
+        command: commandStr,
+        cwd,
+      },
+      description: reason || `Execute: ${commandStr}`,
+      tool_use_id: params.callId as string || requestId,
+      timestamp: Date.now(),
+    };
+
+    this.emit({ type: "permission_request", request: perm });
+  }
+
   // ── Item event handlers ─────────────────────────────────────────────────
 
   private handleItemStarted(params: Record<string, unknown>): void {
@@ -789,10 +975,10 @@ export class CodexAdapter {
         const fc = item as CodexFileChangeItem;
         const changes = fc.changes || [];
         const firstChange = changes[0];
-        const toolName = firstChange?.kind === "create" ? "Write" : "Edit";
+        const toolName = safeKind(firstChange?.kind) === "create" ? "Write" : "Edit";
         const toolInput = {
           file_path: firstChange?.path || "",
-          changes: changes.map((c) => ({ path: c.path, kind: c.kind })),
+          changes: changes.map((c) => ({ path: c.path, kind: safeKind(c.kind) })),
         };
         this.emitToolUseStart(item.id, toolName, toolInput);
         break;
@@ -920,6 +1106,7 @@ export class CodexAdapter {
             usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
           },
           parent_tool_use_id: null,
+          timestamp: Date.now(),
         });
 
         // Reset streaming state
@@ -940,7 +1127,7 @@ export class CodexAdapter {
         const exitCode = typeof cmd.exitCode === "number" ? cmd.exitCode : 0;
         const failed = cmd.status === "failed" || cmd.status === "declined" || exitCode !== 0;
 
-        // Avoid noisy placeholder output for successful commands with no stdout/stderr.
+        // Keep successful no-output commands silent in the chat feed.
         if (!combinedOutput && !failed) {
           break;
         }
@@ -960,13 +1147,13 @@ export class CodexAdapter {
         const fc = item as CodexFileChangeItem;
         const changes = fc.changes || [];
         const firstChange = changes[0];
-        const toolName = firstChange?.kind === "create" ? "Write" : "Edit";
+        const toolName = safeKind(firstChange?.kind) === "create" ? "Write" : "Edit";
         // Ensure tool_use was emitted
         this.ensureToolUseEmitted(item.id, toolName, {
           file_path: firstChange?.path || "",
-          changes: changes.map((c) => ({ path: c.path, kind: c.kind })),
+          changes: changes.map((c) => ({ path: c.path, kind: safeKind(c.kind) })),
         });
-        const summary = changes.map((c) => `${c.kind}: ${c.path}`).join("\n");
+        const summary = changes.map((c) => `${safeKind(c.kind)}: ${c.path}`).join("\n");
         this.emitToolResult(item.id, summary || "File changes applied", fc.status === "failed");
         break;
       }
@@ -1009,6 +1196,7 @@ export class CodexAdapter {
               usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
             },
             parent_tool_use_id: null,
+            timestamp: Date.now(),
           });
         }
 
@@ -1059,6 +1247,15 @@ export class CodexAdapter {
 
     this.emit({ type: "result", data: result });
     this.currentTurnId = null;
+  }
+
+  private updateRateLimits(data: Record<string, unknown>): void {
+    const rl = data?.rateLimits as Record<string, unknown> | undefined;
+    if (!rl) return;
+    this._rateLimits = {
+      primary: rl.primary as { usedPercent: number; windowDurationMins: number; resetsAt: number } | null,
+      secondary: rl.secondary as { usedPercent: number; windowDurationMins: number; resetsAt: number } | null,
+    };
   }
 
   private handleTokenUsageUpdated(params: Record<string, unknown>): void {
@@ -1120,6 +1317,7 @@ export class CodexAdapter {
         usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
       parent_tool_use_id: null,
+      timestamp: Date.now(),
     });
   }
 
@@ -1157,7 +1355,8 @@ export class CodexAdapter {
   }
 
   /** Emit an assistant message with a tool_result content block. */
-  private emitToolResult(toolUseId: string, content: string, isError: boolean): void {
+  private emitToolResult(toolUseId: string, content: unknown, isError: boolean): void {
+    const safeContent = typeof content === "string" ? content : JSON.stringify(content);
     this.emit({
       type: "assistant",
       message: {
@@ -1169,7 +1368,7 @@ export class CodexAdapter {
           {
             type: "tool_result",
             tool_use_id: toolUseId,
-            content,
+            content: safeContent,
             is_error: isError,
           },
         ],
@@ -1177,6 +1376,7 @@ export class CodexAdapter {
         usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
       parent_tool_use_id: null,
+      timestamp: Date.now(),
     });
   }
 
@@ -1188,7 +1388,7 @@ export class CodexAdapter {
       case "acceptEdits":
       case "default":
       default:
-        return "unless-trusted";
+        return "untrusted";
     }
   }
 

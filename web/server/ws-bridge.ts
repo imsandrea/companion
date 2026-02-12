@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
+import { resolve } from "node:path";
 import type {
   CLIMessage,
   CLISystemInitMessage,
@@ -77,6 +78,54 @@ function makeDefaultState(sessionId: string, backendType: BackendType = "claude"
   };
 }
 
+// ─── Git info helper ─────────────────────────────────────────────────────────
+
+function resolveGitInfo(state: SessionState): void {
+  if (!state.cwd) return;
+  try {
+    state.git_branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: state.cwd, encoding: "utf-8", timeout: 3000,
+    }).trim();
+
+    try {
+      const gitDir = execSync("git rev-parse --git-dir", {
+        cwd: state.cwd, encoding: "utf-8", timeout: 3000,
+      }).trim();
+      state.is_worktree = gitDir.includes("/worktrees/");
+    } catch { /* ignore */ }
+
+    try {
+      if (state.is_worktree) {
+        // For worktrees, --show-toplevel returns the worktree dir, not the original repo.
+        // Use --git-common-dir to find the shared .git dir, then derive the repo root.
+        const commonDir = execSync("git rev-parse --git-common-dir", {
+          cwd: state.cwd, encoding: "utf-8", timeout: 3000,
+        }).trim();
+        state.repo_root = resolve(state.cwd, commonDir, "..");
+      } else {
+        state.repo_root = execSync("git rev-parse --show-toplevel", {
+          cwd: state.cwd, encoding: "utf-8", timeout: 3000,
+        }).trim();
+      }
+    } catch { /* ignore */ }
+
+    try {
+      const counts = execSync(
+        "git rev-list --left-right --count @{upstream}...HEAD",
+        { cwd: state.cwd, encoding: "utf-8", timeout: 3000 },
+      ).trim();
+      const [behind, ahead] = counts.split(/\s+/).map(Number);
+      state.git_ahead = ahead || 0;
+      state.git_behind = behind || 0;
+    } catch {
+      state.git_ahead = 0;
+      state.git_behind = 0;
+    }
+  } catch {
+    // Not a git repo or git not available
+  }
+}
+
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
 export class WsBridge {
@@ -86,6 +135,7 @@ export class WsBridge {
   private onCLIRelaunchNeeded: ((sessionId: string) => void) | null = null;
   private onFirstTurnCompleted: ((sessionId: string, firstUserMessage: string) => void) | null = null;
   private autoNamingAttempted = new Set<string>();
+  private userMsgCounter = 0;
 
   /** Register a callback for when we learn the CLI's internal session ID. */
   onCLISessionIdReceived(cb: (sessionId: string, cliSessionId: string) => void): void {
@@ -126,6 +176,8 @@ export class WsBridge {
         pendingMessages: p.pendingMessages || [],
       };
       session.state.backend_type = session.backendType;
+      // Resolve git info for restored sessions (may have been persisted without it)
+      resolveGitInfo(session.state);
       this.sessions.set(p.id, session);
       // Restored sessions with completed turns don't need auto-naming re-triggered
       if (session.state.num_turns > 0) {
@@ -153,25 +205,28 @@ export class WsBridge {
 
   // ── Session management ──────────────────────────────────────────────────
 
-  getOrCreateSession(sessionId: string, backendType: BackendType = "claude"): Session {
+  getOrCreateSession(sessionId: string, backendType?: BackendType): Session {
     let session = this.sessions.get(sessionId);
     if (!session) {
+      const type = backendType || "claude";
       session = {
         id: sessionId,
-        backendType,
+        backendType: type,
         cliSocket: null,
         codexAdapter: null,
         browserSockets: new Set(),
-        state: makeDefaultState(sessionId, backendType),
+        state: makeDefaultState(sessionId, type),
         pendingPermissions: new Map(),
         messageHistory: [],
         pendingMessages: [],
       };
       this.sessions.set(sessionId, session);
+    } else if (backendType) {
+      // Only overwrite backendType when explicitly provided (e.g. attachCodexAdapter)
+      // Prevents handleBrowserOpen from resetting codex→claude
+      session.backendType = backendType;
+      session.state.backend_type = backendType;
     }
-    // Only update backendType for NEW sessions (already set above).
-    // Existing sessions must keep their original backendType to avoid
-    // corrupting Codex sessions when browsers reconnect without specifying the type.
     return session;
   }
 
@@ -181,6 +236,11 @@ export class WsBridge {
 
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map((s) => s.state);
+  }
+
+  getCodexRateLimits(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    return session?.codexAdapter?.getRateLimits() ?? null;
   }
 
   isCliConnected(sessionId: string): boolean {
@@ -245,6 +305,7 @@ export class WsBridge {
     adapter.onBrowserMessage((msg) => {
       if (msg.type === "session_init") {
         session.state = { ...session.state, ...msg.session, backend_type: "codex" };
+        resolveGitInfo(session.state);
         this.persistSession(session);
       } else if (msg.type === "session_update") {
         session.state = { ...session.state, ...msg.session, backend_type: "codex" };
@@ -255,7 +316,10 @@ export class WsBridge {
       }
 
       // Store assistant/result messages in history for replay
-      if (msg.type === "assistant" || msg.type === "result") {
+      if (msg.type === "assistant") {
+        session.messageHistory.push({ ...msg, timestamp: msg.timestamp || Date.now() });
+        this.persistSession(session);
+      } else if (msg.type === "result") {
         session.messageHistory.push(msg);
         this.persistSession(session);
       }
@@ -523,46 +587,7 @@ export class WsBridge {
       session.state.skills = msg.skills ?? [];
 
       // Resolve git info from session cwd
-      if (session.state.cwd) {
-        try {
-          session.state.git_branch = execSync("git rev-parse --abbrev-ref HEAD", {
-            cwd: session.state.cwd,
-            encoding: "utf-8",
-            timeout: 3000,
-          }).trim();
-
-          // Detect if in a worktree
-          try {
-            const gitDir = execSync("git rev-parse --git-dir", {
-              cwd: session.state.cwd, encoding: "utf-8", timeout: 3000,
-            }).trim();
-            session.state.is_worktree = gitDir.includes("/worktrees/");
-          } catch { /* ignore */ }
-
-          // Get repo root
-          try {
-            session.state.repo_root = execSync("git rev-parse --show-toplevel", {
-              cwd: session.state.cwd, encoding: "utf-8", timeout: 3000,
-            }).trim();
-          } catch { /* ignore */ }
-
-          // Ahead/behind remote
-          try {
-            const counts = execSync(
-              "git rev-list --left-right --count @{upstream}...HEAD",
-              { cwd: session.state.cwd, encoding: "utf-8", timeout: 3000 },
-            ).trim();
-            const [behind, ahead] = counts.split(/\s+/).map(Number);
-            session.state.git_ahead = ahead || 0;
-            session.state.git_behind = behind || 0;
-          } catch {
-            session.state.git_ahead = 0;
-            session.state.git_behind = 0;
-          }
-        } catch {
-          // Not a git repo or git not available
-        }
-      }
+      resolveGitInfo(session.state);
 
       this.broadcastToBrowsers(session, {
         type: "session_init",
@@ -589,6 +614,7 @@ export class WsBridge {
       type: "assistant",
       message: msg.message,
       parent_tool_use_id: msg.parent_tool_use_id,
+      timestamp: Date.now(),
     };
     session.messageHistory.push(browserMsg);
     this.broadcastToBrowsers(session, browserMsg);
@@ -707,12 +733,14 @@ export class WsBridge {
   private routeBrowserMessage(session: Session, msg: BrowserOutgoingMessage) {
     // For Codex sessions, delegate entirely to the adapter
     if (session.backendType === "codex") {
-      // Store user messages in history for replay
+      // Store user messages in history for replay with stable ID for dedup on reconnect
       if (msg.type === "user_message") {
+        const ts = Date.now();
         session.messageHistory.push({
           type: "user_message",
           content: msg.content,
-          timestamp: Date.now(),
+          timestamp: ts,
+          id: `user-${ts}-${this.userMsgCounter++}`,
         });
         this.persistSession(session);
       }
@@ -761,11 +789,13 @@ export class WsBridge {
     session: Session,
     msg: { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string }[] }
   ) {
-    // Store user message in history for replay (text-only for replay)
+    // Store user message in history for replay with stable ID for dedup on reconnect
+    const ts = Date.now();
     session.messageHistory.push({
       type: "user_message",
       content: msg.content,
-      timestamp: Date.now(),
+      timestamp: ts,
+      id: `user-${ts}-${this.userMsgCounter++}`,
     });
 
     // Build content: if images are present, use content block array; otherwise plain string
