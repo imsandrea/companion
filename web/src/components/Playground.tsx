@@ -2,11 +2,13 @@ import { useState, useEffect } from "react";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { MessageBubble } from "./MessageBubble.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
+import { DiffViewer } from "./DiffViewer.js";
 import { UpdateBanner } from "./UpdateBanner.js";
 import { useStore } from "../store.js";
 import type { PermissionRequest, ChatMessage, ContentBlock } from "../types.js";
 import type { TaskItem } from "../types.js";
-import type { UpdateInfo } from "../api.js";
+import type { UpdateInfo, GitHubPRInfo } from "../api.js";
+import { GitHubPRDisplay } from "./TaskPanel.js";
 
 // ─── Mock Data ──────────────────────────────────────────────────────────────
 
@@ -293,6 +295,81 @@ const MOCK_SUBAGENT_TOOL_ITEMS = [
   { id: "sa-2", name: "Grep", input: { pattern: "session.userId", path: "src/" } },
 ];
 
+// GitHub PR mock data
+const MOCK_PR_FAILING: GitHubPRInfo = {
+  number: 162,
+  title: "feat: add dark mode toggle to application settings",
+  url: "https://github.com/example/project/pull/162",
+  state: "OPEN",
+  isDraft: false,
+  reviewDecision: "CHANGES_REQUESTED",
+  additions: 91,
+  deletions: 88,
+  changedFiles: 24,
+  checks: [
+    { name: "CI / Build", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "CI / Test", status: "COMPLETED", conclusion: "FAILURE" },
+    { name: "CI / Lint", status: "COMPLETED", conclusion: "SUCCESS" },
+  ],
+  checksSummary: { total: 3, success: 2, failure: 1, pending: 0 },
+  reviewThreads: { total: 4, resolved: 2, unresolved: 2 },
+};
+
+const MOCK_PR_PASSING: GitHubPRInfo = {
+  number: 158,
+  title: "fix: prevent mobile keyboard layout shift and iOS zoom",
+  url: "https://github.com/example/project/pull/158",
+  state: "OPEN",
+  isDraft: false,
+  reviewDecision: "APPROVED",
+  additions: 42,
+  deletions: 12,
+  changedFiles: 3,
+  checks: [
+    { name: "CI / Build", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "CI / Test", status: "COMPLETED", conclusion: "SUCCESS" },
+  ],
+  checksSummary: { total: 2, success: 2, failure: 0, pending: 0 },
+  reviewThreads: { total: 1, resolved: 1, unresolved: 0 },
+};
+
+const MOCK_PR_DRAFT: GitHubPRInfo = {
+  number: 165,
+  title: "refactor: migrate auth module to JWT tokens with refresh support",
+  url: "https://github.com/example/project/pull/165",
+  state: "OPEN",
+  isDraft: true,
+  reviewDecision: null,
+  additions: 340,
+  deletions: 156,
+  changedFiles: 18,
+  checks: [
+    { name: "CI / Build", status: "IN_PROGRESS", conclusion: null },
+    { name: "CI / Test", status: "QUEUED", conclusion: null },
+  ],
+  checksSummary: { total: 2, success: 0, failure: 0, pending: 2 },
+  reviewThreads: { total: 0, resolved: 0, unresolved: 0 },
+};
+
+const MOCK_PR_MERGED: GitHubPRInfo = {
+  number: 155,
+  title: "feat(cli): add service install/uninstall and separate dev/prod ports",
+  url: "https://github.com/example/project/pull/155",
+  state: "MERGED",
+  isDraft: false,
+  reviewDecision: "APPROVED",
+  additions: 287,
+  deletions: 63,
+  changedFiles: 11,
+  checks: [
+    { name: "CI / Build", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "CI / Test", status: "COMPLETED", conclusion: "SUCCESS" },
+    { name: "CI / Lint", status: "COMPLETED", conclusion: "SUCCESS" },
+  ],
+  checksSummary: { total: 3, success: 3, failure: 0, pending: 0 },
+  reviewThreads: { total: 3, resolved: 3, unresolved: 0 },
+};
+
 // ─── Playground Component ───────────────────────────────────────────────────
 
 export function Playground() {
@@ -437,6 +514,32 @@ export function Playground() {
                 <TaskRow key={task.id} task={task} />
               ))}
             </div>
+          </div>
+        </Section>
+
+        {/* ─── GitHub PR Status ──────────────────────────────── */}
+        <Section title="GitHub PR Status" description="PR health shown in the TaskPanel — checks, reviews, unresolved comments">
+          <div className="space-y-4">
+            <Card label="Open PR — failing checks + changes requested">
+              <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
+                <GitHubPRDisplay pr={MOCK_PR_FAILING} />
+              </div>
+            </Card>
+            <Card label="Open PR — all checks passed + approved">
+              <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
+                <GitHubPRDisplay pr={MOCK_PR_PASSING} />
+              </div>
+            </Card>
+            <Card label="Draft PR — pending checks">
+              <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
+                <GitHubPRDisplay pr={MOCK_PR_DRAFT} />
+              </div>
+            </Card>
+            <Card label="Merged PR">
+              <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
+                <GitHubPRDisplay pr={MOCK_PR_MERGED} />
+              </div>
+            </Card>
           </div>
         </Section>
 
@@ -702,6 +805,58 @@ export function Playground() {
                 agentType="Explore"
                 items={MOCK_SUBAGENT_TOOL_ITEMS}
               />
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Diff Viewer ──────────────────────────────── */}
+        <Section title="Diff Viewer" description="Unified diff rendering with word-level highlighting — used in ToolBlock, PermissionBanner, and DiffPanel">
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Edit diff (compact mode)">
+              <DiffViewer
+                oldText={'export function formatDate(d: Date) {\n  return d.toISOString();\n}'}
+                newText={'export function formatDate(d: Date, locale = "en-US") {\n  return d.toLocaleDateString(locale, {\n    year: "numeric",\n    month: "short",\n    day: "numeric",\n  });\n}'}
+                fileName="src/utils/format.ts"
+                mode="compact"
+              />
+            </Card>
+            <Card label="New file diff (compact mode)">
+              <DiffViewer
+                newText={'export const config = {\n  apiUrl: "https://api.example.com",\n  timeout: 5000,\n  retries: 3,\n  debug: process.env.NODE_ENV !== "production",\n};\n'}
+                fileName="src/config.ts"
+                mode="compact"
+              />
+            </Card>
+            <Card label="Git diff (full mode with line numbers)">
+              <DiffViewer
+                unifiedDiff={`diff --git a/src/auth/middleware.ts b/src/auth/middleware.ts
+--- a/src/auth/middleware.ts
++++ b/src/auth/middleware.ts
+@@ -1,8 +1,12 @@
+-import { getSession } from "./session";
++import { verifyToken } from "./jwt";
++import type { Request, Response, NextFunction } from "express";
+
+-export function authMiddleware(req, res, next) {
+-  const session = getSession(req);
+-  if (!session?.userId) {
++export function authMiddleware(req: Request, res: Response, next: NextFunction) {
++  const header = req.headers.authorization;
++  if (!header?.startsWith("Bearer ")) {
+     return res.status(401).json({ error: "Unauthorized" });
+   }
+-  req.userId = session.userId;
++  const token = header.slice(7);
++  const payload = verifyToken(token);
++  if (!payload) return res.status(401).json({ error: "Invalid token" });
++  req.userId = payload.userId;
+   next();
+ }`}
+                mode="full"
+              />
+            </Card>
+            <Card label="No changes">
+              <DiffViewer oldText="same content" newText="same content" />
             </Card>
           </div>
         </Section>

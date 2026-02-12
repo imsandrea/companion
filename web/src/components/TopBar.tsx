@@ -11,6 +11,17 @@ export function TopBar() {
   const setTaskPanelOpen = useStore((s) => s.setTaskPanelOpen);
   const activeTab = useStore((s) => s.activeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const changedFilesCount = useStore((s) => {
+    if (!currentSessionId) return 0;
+    const cwd =
+      s.sessions.get(currentSessionId)?.cwd ||
+      s.sdkSessions.find((sdk) => sdk.sessionId === currentSessionId)?.cwd;
+    const files = s.changedFiles.get(currentSessionId);
+    if (!files) return 0;
+    if (!cwd) return files.size;
+    const prefix = `${cwd}/`;
+    return [...files].filter((fp) => fp === cwd || fp.startsWith(prefix)).length;
+  });
 
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
@@ -77,14 +88,19 @@ export function TopBar() {
               Chat
             </button>
             <button
-              onClick={() => setActiveTab("editor")}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
-                activeTab === "editor"
+              onClick={() => setActiveTab("diff")}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+                activeTab === "diff"
                   ? "bg-cc-card text-cc-fg shadow-sm"
                   : "text-cc-muted hover:text-cc-fg"
               }`}
             >
-              Editor
+              Diffs
+              {changedFilesCount > 0 && (
+                <span className="text-[9px] bg-cc-warning text-white rounded-full w-4 h-4 flex items-center justify-center font-semibold leading-none">
+                  {changedFilesCount}
+                </span>
+              )}
             </button>
           </div>
 

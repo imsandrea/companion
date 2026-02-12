@@ -19,6 +19,22 @@ import {
   setUpdateInProgress,
 } from "./update-checker.js";
 
+function execCaptureStdout(
+  command: string,
+  options: { cwd: string; encoding: "utf-8"; timeout: number },
+): string {
+  try {
+    return execSync(command, options);
+  } catch (err: unknown) {
+    const maybe = err as { stdout?: Buffer | string };
+    if (typeof maybe.stdout === "string") return maybe.stdout;
+    if (maybe.stdout && Buffer.isBuffer(maybe.stdout)) {
+      return maybe.stdout.toString("utf-8");
+    }
+    throw err;
+  }
+}
+
 export function createRoutes(
   launcher: CliLauncher,
   wsBridge: WsBridge,
@@ -428,11 +444,38 @@ export function createRoutes(
     if (!filePath) return c.json({ error: "path required" }, 400);
     const absPath = resolve(filePath);
     try {
-      const diff = execSync(`git diff HEAD -- "${absPath}"`, {
+      const repoRoot = execSync("git rev-parse --show-toplevel", {
         cwd: dirname(absPath),
         encoding: "utf-8",
         timeout: 5000,
+      }).trim();
+      const relPath = execSync(`git -C "${repoRoot}" ls-files --full-name -- "${absPath}"`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim() || absPath;
+
+      let diff = execCaptureStdout(`git diff HEAD -- "${relPath}"`, {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        timeout: 5000,
       });
+
+      // For untracked files, HEAD diff is empty. Show full file as added.
+      if (!diff.trim()) {
+        const untracked = execSync(`git ls-files --others --exclude-standard -- "${relPath}"`, {
+          cwd: repoRoot,
+          encoding: "utf-8",
+          timeout: 5000,
+        }).trim();
+        if (untracked) {
+          diff = execCaptureStdout(`git diff --no-index -- /dev/null "${absPath}"`, {
+            cwd: repoRoot,
+            encoding: "utf-8",
+            timeout: 5000,
+          });
+        }
+      }
+
       return c.json({ path: absPath, diff });
     } catch {
       return c.json({ path: absPath, diff: "" });
@@ -572,6 +615,22 @@ export function createRoutes(
       /* no upstream */
     }
     return c.json({ ...result, git_ahead, git_behind });
+  });
+
+  // ─── GitHub PR Status ────────────────────────────────────────────────
+
+  api.get("/git/pr-status", async (c) => {
+    const cwd = c.req.query("cwd");
+    const branch = c.req.query("branch");
+    if (!cwd || !branch) return c.json({ error: "cwd and branch required" }, 400);
+
+    const { isGhAvailable, fetchPRInfo } = await import("./github-pr.js");
+    if (!isGhAvailable()) {
+      return c.json({ available: false, pr: null });
+    }
+
+    const pr = await fetchPRInfo(cwd, branch);
+    return c.json({ available: true, pr });
   });
 
   // ─── Usage Limits ─────────────────────────────────────────────────────
