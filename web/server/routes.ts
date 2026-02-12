@@ -155,7 +155,6 @@ export function createRoutes(
         env: envVars,
         backendType: backend,
         worktreeInfo,
-        containerInfo,
       });
 
       // Re-track container with real session ID

@@ -135,10 +135,13 @@ describe("SettingsPage", () => {
   });
 
   it("shows saving state while request is in flight", async () => {
-    let resolveSave: ((value: unknown) => void) | null = null;
+    let resolveSave: ((value: {
+      openrouterApiKeyConfigured: boolean;
+      openrouterModel: string;
+    }) => void) | undefined;
     mockApi.updateSettings.mockReturnValueOnce(
       new Promise((resolve) => {
-        resolveSave = resolve;
+        resolveSave = resolve as typeof resolveSave;
       }),
     );
 
@@ -152,12 +155,10 @@ describe("SettingsPage", () => {
 
     expect(screen.getByRole("button", { name: "Saving..." })).toBeDisabled();
 
-    if (resolveSave) {
-      resolveSave({
-        openrouterApiKeyConfigured: true,
-        openrouterModel: "openrouter/free",
-      });
-    }
+    resolveSave?.({
+      openrouterApiKeyConfigured: true,
+      openrouterModel: "openrouter/free",
+    });
 
     await screen.findByText("Settings saved.");
   });
