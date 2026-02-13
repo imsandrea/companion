@@ -365,6 +365,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
       break;
     }
 
+    case "mcp_status": {
+      store.setMcpServers(sessionId, data.servers);
+      break;
+    }
+
     case "message_history": {
       const chatMessages: ChatMessage[] = [];
       for (let i = 0; i < data.messages.length; i++) {
@@ -526,4 +531,16 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(msg));
   }
+}
+
+export function sendMcpGetStatus(sessionId: string) {
+  sendToSession(sessionId, { type: "mcp_get_status" });
+}
+
+export function sendMcpToggle(sessionId: string, serverName: string, enabled: boolean) {
+  sendToSession(sessionId, { type: "mcp_toggle", serverName, enabled });
+}
+
+export function sendMcpReconnect(sessionId: string, serverName: string) {
+  sendToSession(sessionId, { type: "mcp_reconnect", serverName });
 }
