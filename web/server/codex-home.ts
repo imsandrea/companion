@@ -12,11 +12,10 @@ export function getLegacyCodexHome(): string {
 }
 
 export function resolveCompanionCodexHome(explicitCodexHome?: string): string {
-  return resolve(
-    explicitCodexHome
-      || process.env.CODEX_HOME
-      || DEFAULT_COMPANION_CODEX_HOME,
-  );
+  // Intentionally do NOT fall back to process.env.CODEX_HOME here.
+  // That env var points to the user's global Codex home (~/.codex), which
+  // would break per-session isolation by nesting session dirs inside it.
+  return resolve(explicitCodexHome || DEFAULT_COMPANION_CODEX_HOME);
 }
 
 export function resolveCompanionCodexSessionHome(

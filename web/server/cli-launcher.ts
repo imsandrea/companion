@@ -356,19 +356,27 @@ export class CliLauncher {
     // while intentionally skipping sessions/sqlite to avoid stale rollout indexes.
     const fileSeeds = ["auth.json", "config.toml", "models_cache.json", "version.json"];
     for (const name of fileSeeds) {
-      const src = join(legacyHome, name);
-      const dest = join(codexHome, name);
-      if (!existsSync(dest) && existsSync(src)) {
-        copyFileSync(src, dest);
+      try {
+        const src = join(legacyHome, name);
+        const dest = join(codexHome, name);
+        if (!existsSync(dest) && existsSync(src)) {
+          copyFileSync(src, dest);
+        }
+      } catch (e) {
+        console.warn(`[cli-launcher] Failed to bootstrap ${name} from legacy home:`, e);
       }
     }
 
     const dirSeeds = ["skills", "vendor_imports", "prompts", "rules"];
     for (const name of dirSeeds) {
-      const src = join(legacyHome, name);
-      const dest = join(codexHome, name);
-      if (!existsSync(dest) && existsSync(src)) {
-        cpSync(src, dest, { recursive: true });
+      try {
+        const src = join(legacyHome, name);
+        const dest = join(codexHome, name);
+        if (!existsSync(dest) && existsSync(src)) {
+          cpSync(src, dest, { recursive: true });
+        }
+      } catch (e) {
+        console.warn(`[cli-launcher] Failed to bootstrap ${name}/ from legacy home:`, e);
       }
     }
   }
