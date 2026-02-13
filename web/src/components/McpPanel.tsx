@@ -314,12 +314,14 @@ export function McpSection({ sessionId }: { sessionId: string }) {
 
   const hasMcp = servers.length > 0 || sessionMcpServers.length > 0;
 
-  // Auto-fetch detailed status when section becomes visible and CLI is connected
+  // Auto-fetch detailed status when connected.
+  // For Codex sessions, session_init may not include MCP server hints, so
+  // we must fetch regardless of current hasMcp detection.
   useEffect(() => {
-    if (cliConnected && hasMcp) {
+    if (cliConnected) {
       sendMcpGetStatus(sessionId);
     }
-  }, [sessionId, cliConnected, hasMcp]);
+  }, [sessionId, cliConnected]);
 
   // If we have detailed servers, use those; otherwise fall back to basic info
   const displayServers: McpServerDetail[] =
@@ -359,23 +361,21 @@ export function McpSection({ sessionId }: { sessionId: string }) {
             </svg>
           </button>
           {/* Refresh button */}
-          {hasMcp && (
-            <button
-              onClick={() => sendMcpGetStatus(sessionId)}
-              disabled={!cliConnected}
-              className={`text-[11px] font-medium transition-colors ${
-                cliConnected
-                  ? "text-cc-muted hover:text-cc-fg cursor-pointer"
-                  : "text-cc-muted/30 cursor-not-allowed"
-              }`}
-              title="Refresh MCP server status"
-            >
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-                <path d="M2.5 8a5.5 5.5 0 019.78-3.5M13.5 8a5.5 5.5 0 01-9.78 3.5" strokeLinecap="round" />
-                <path d="M12.5 2v3h-3M3.5 14v-3h3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-          )}
+          <button
+            onClick={() => sendMcpGetStatus(sessionId)}
+            disabled={!cliConnected}
+            className={`text-[11px] font-medium transition-colors ${
+              cliConnected
+                ? "text-cc-muted hover:text-cc-fg cursor-pointer"
+                : "text-cc-muted/30 cursor-not-allowed"
+            }`}
+            title="Refresh MCP server status"
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+              <path d="M2.5 8a5.5 5.5 0 019.78-3.5M13.5 8a5.5 5.5 0 01-9.78 3.5" strokeLinecap="round" />
+              <path d="M12.5 2v3h-3M3.5 14v-3h3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </div>
       </div>
 
