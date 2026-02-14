@@ -31,6 +31,51 @@ function readFileAsBase64(file: File): Promise<{ base64: string; mediaType: stri
 
 let idCounter = 0;
 
+// Detect project code from working directory path
+function detectProjectFromPath(cwd: string): string | null {
+  const projectMap: Record<string, string> = {
+    "satellite": "satellite",
+    "marketing-dashboard": "marketing-dashboard",
+    "project-hub": "project-hub",
+    "mail-radar": "mail-radar",
+    "ims-luxury-site": "ims-luxury",
+    "immobilsarda": "immobilsarda",
+    "uep": "uep",
+    "claude-definitivo": "claude-definitivo",
+  };
+
+  for (const [pathFragment, projectCode] of Object.entries(projectMap)) {
+    if (cwd.includes(pathFragment)) {
+      return projectCode;
+    }
+  }
+  return null;
+}
+
+// Format project context for injection into prompt
+function formatProjectContext(context: any): string {
+  let output = "# Project Context\n\n";
+
+  if (context.project_code) {
+    output += `**Project:** ${context.project_code}\n\n`;
+  }
+
+  if (context.work_items && context.work_items.length > 0) {
+    output += "**Open Work Items:**\n";
+    context.work_items.slice(0, 5).forEach((item: any) => {
+      output += `- [${item.status}] ${item.title} (${item.type})\n`;
+    });
+    output += "\n";
+  }
+
+  if (context.last_handover) {
+    output += "**Last Session:**\n";
+    output += `${context.last_handover.summary || "No summary"}\n\n`;
+  }
+
+  return output;
+}
+
 export function HomePage() {
   const [text, setText] = useState("");
   const [backend, setBackend] = useState<BackendType>(() =>
@@ -315,10 +360,29 @@ export function HomePage() {
       // Wait for WebSocket connection
       await waitForConnection(sessionId);
 
+      // Load project context if working in a known project directory
+      let enrichedMessage = msg;
+      if (cwd) {
+        const projectCode = detectProjectFromPath(cwd);
+        if (projectCode) {
+          try {
+            const contextResp = await fetch(`/api/project/context?project=${projectCode}`);
+            if (contextResp.ok) {
+              const context = await contextResp.json();
+              const contextPrefix = formatProjectContext(context);
+              enrichedMessage = `${contextPrefix}\n\n${msg}`;
+            }
+          } catch (err) {
+            console.warn("[project-context] Failed to load context:", err);
+            // Continue with original message
+          }
+        }
+      }
+
       // Send message
       sendToSession(sessionId, {
         type: "user_message",
-        content: msg,
+        content: enrichedMessage,
         session_id: sessionId,
         images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
       });
