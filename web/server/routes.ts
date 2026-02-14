@@ -1039,5 +1039,47 @@ export function createRoutes(
     return c.json({ ok: true });
   });
 
+  /** Load project context from Satellite KB */
+  api.get("/project/context", async (c) => {
+    const projectCode = c.req.query("project");
+    if (!projectCode) return c.json({ error: "project parameter required" }, 400);
+
+    const SATELLITE_API = "http://82.165.153.71";
+    const API_KEY = "8fWo_Xy8dAR3CgUeNhvHnV-InZWpeHLYFaTo6UaxnDU";
+
+    try {
+      // Fetch data in parallel from Satellite
+      const [summary, workItems, handover] = await Promise.all([
+        fetch(`${SATELLITE_API}/api/claude-kb/project/${projectCode}/summary?days=7`, {
+          headers: { "X-API-Key": API_KEY }
+        }).then(r => r.ok ? r.json() : null),
+
+        fetch(`${SATELLITE_API}/api/hub/items?project=${projectCode}&status=open`, {
+          headers: { "X-API-Key": API_KEY }
+        }).then(r => r.ok ? r.json() : null),
+
+        fetch(`${SATELLITE_API}/api/claude-kb/handover?project=${projectCode}&limit=1`, {
+          headers: { "X-API-Key": API_KEY }
+        }).then(r => r.ok ? r.json() : null),
+      ]);
+
+      return c.json({
+        project_code: projectCode,
+        summary: summary || {},
+        work_items: workItems || [],
+        last_handover: handover?.[0] || null,
+      });
+    } catch (error: unknown) {
+      console.error("[project/context] Error fetching from Satellite:", error);
+      return c.json({
+        error: error instanceof Error ? error.message : "Failed to fetch context",
+        project_code: projectCode,
+        summary: {},
+        work_items: [],
+        last_handover: null,
+      }, 500);
+    }
+  });
+
   return api;
 }
